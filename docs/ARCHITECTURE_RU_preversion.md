@@ -1,1085 +1,924 @@
-<!--
-SPDX-FileCopyrightText: 2026-Present Contributors to FluffyChat
+# Архитектура FluffyChat и практическое изучение клиента Matrix
 
-SPDX-License-Identifier: AGPL-3.0-or-later
--->
-
-# FluffyChat: архитектура клиента и практическое изучение с Matrix Synapse
-
-> Документ описывает состояние исходного кода в этой ветке (FluffyChat `2.8.0`, Dart `>=3.11.1`, `matrix` `^10.0.1`). При обновлении зависимостей детали API могут измениться.
+> Документ относится к текущему состоянию этого репозитория (FluffyChat 2.8.0,
+> Flutter/Dart) и рассчитан в том числе на начинающего разработчика. Имена
+> классов и файлов приведены специально: по ним удобно переходить от текста к
+> коду.
 
 ## Содержание
 
 1. [Что это за проект](#1-что-это-за-проект)
-2. [Matrix и Synapse: важное различие](#2-matrix-и-synapse-важное-различие)
-3. [Общая архитектура](#3-общая-архитектура)
-4. [Запуск приложения](#4-запуск-приложения)
-5. [State Management](#5-state-management)
-6. [Routing](#6-routing)
+2. [Карта репозитория](#2-карта-репозитория)
+3. [Архитектура и запуск приложения](#3-архитектура-и-запуск-приложения)
+4. [State Management](#4-state-management)
+5. [Routing](#5-routing)
+6. [Matrix SDK, сеть и синхронизация](#6-matrix-sdk-сеть-и-синхронизация)
 7. [Хранение данных](#7-хранение-данных)
-8. [Криптография и сквозное шифрование](#8-криптография-и-сквозное-шифрование)
-9. [Сеть, синхронизация и сообщения](#9-сеть-синхронизация-и-сообщения)
-10. [Структура UI и адаптивность](#10-структура-ui-и-адаптивность)
-11. [Аутентификация](#11-аутентификация)
-12. [Уведомления и фоновые процессы](#12-уведомления-и-фоновые-процессы)
-13. [Медиа, VoIP и платформенные возможности](#13-медиа-voip-и-платформенные-возможности)
-14. [Основные библиотеки](#14-основные-библиотеки)
-15. [Локализация, конфигурация и темы](#15-локализация-конфигурация-и-темы)
-16. [Развёртывание собственного Synapse](#16-развёртывание-собственного-synapse)
-17. [Подключение FluffyChat к своему серверу](#17-подключение-fluffychat-к-своему-серверу)
-18. [Отладка полного сценария](#18-отладка-полного-сценария)
-19. [Тестирование и качество кода](#19-тестирование-и-качество-кода)
-20. [План изучения для Junior](#20-план-изучения-для-junior)
-21. [Глоссарий и источники](#21-глоссарий-и-источники)
+8. [Криптография и шифрование](#8-криптография-и-шифрование)
+9. [Аутентификация и несколько аккаунтов](#9-аутентификация-и-несколько-аккаунтов)
+10. [Сообщения, медиа, уведомления и звонки](#10-сообщения-медиа-уведомления-и-звонки)
+11. [Адаптивный UI, платформы и локализация](#11-адаптивный-ui-платформы-и-локализация)
+12. [Основные библиотеки](#12-основные-библиотеки)
+13. [Тестирование](#13-тестирование)
+14. [Запуск с локальным Synapse](#14-запуск-с-локальным-synapse)
+15. [План изучения кода](#15-план-изучения-кода)
+16. [Глоссарий и частые ошибки](#16-глоссарий-и-частые-ошибки)
 
 ---
 
 ## 1. Что это за проект
 
-**FluffyChat** — свободный кроссплатформенный Matrix-клиент на Flutter. Один код используется для Android, iOS, Web, Linux, Windows и macOS. Приложение умеет работать с личными и групповыми комнатами, Spaces, файлами, реакциями, звонками, push-уведомлениями и Matrix E2EE.
+FluffyChat — свободный мультиплатформенный **клиент протокола Matrix**, написанный
+на Flutter. Формулировка «клиент протокола Matrix-Synapse» неточна:
 
-Главная технологическая цепочка:
+- **Matrix** — открытая спецификация обмена событиями, Client-Server API,
+  федерации и end-to-end encryption (E2EE);
+- **Synapse** — одна из реализаций Matrix homeserver;
+- **FluffyChat** общается с homeserver по Matrix Client-Server API и поэтому не
+  привязан исключительно к Synapse.
+
+Упрощённо роли выглядят так:
 
 ```text
 Flutter widgets
-    ↓
-экраны и их State-контроллеры
-    ↓
-MatrixState (контекст приложения)
-    ↓
-matrix Dart SDK: Client → Room → Timeline → Event
-    ↓
-Matrix Client-Server API по HTTPS
-    ↓
-Homeserver (например, Synapse)
-    ↔ federation ↔ другие Matrix homeserver
+      │ действия пользователя / отображение состояния
+      ▼
+FluffyChat controllers + Matrix widget (application glue)
+      │ Room, Timeline, Event, Client и их Stream
+      ▼
+matrix (Dart SDK)
+      │ HTTPS: /_matrix/client/*, /_matrix/media/*
+      ▼
+Synapse или другой Matrix homeserver
+      │ federation
+      └────────────► другие homeserver
 ```
 
-Репозиторий — именно **клиент**, а не сервер. Бизнес-объекты протокола (`Client`, `Room`, `Timeline`, `Event`, устройства, ключи) в основном предоставляет пакет `matrix`; код FluffyChat связывает SDK с UI и платформенными API.
+Synapse хранит серверную копию комнат и событий и маршрутизирует федерацию.
+FluffyChat хранит локальный кэш, сессию, криптографическое состояние и
+настройки. При E2EE сервер получает зашифрованное содержимое события, но всё
+равно видит необходимую для доставки метаинформацию: комнату, отправителя,
+время, устройства и размеры трафика. E2EE не означает анонимность.
 
-Лицензия проекта — AGPL-3.0-or-later. Перед распространением изменённой версии следует прочитать `LICENSES/AGPL-3.0-or-later.txt` и требования REUSE.
+Лицензия проекта — AGPL-3.0-or-later. Это важно учитывать при распространении
+изменённой версии и предоставлении её как сетевого сервиса.
 
-## 2. Matrix и Synapse: важное различие
+## 2. Карта репозитория
 
-Фраза «протокол Matrix-Synapse» не совсем точна:
+| Путь | Назначение |
+|---|---|
+| `lib/main.dart` | Entry point, инициализация Flutter, настроек, Vodozemac, клиентов и background mode. |
+| `lib/widgets/fluffy_chat_app.dart` | Корневой `MaterialApp.router`, темы, локализация, app lock, `Matrix`. |
+| `lib/widgets/matrix.dart` | Главный application-level coordinator: активный `Client`, аккаунты, подписки SDK, lifecycle, push, verification, VoIP. |
+| `lib/config/routes.dart` | Всё дерево маршрутов `go_router`, redirects и adaptive shell. |
+| `lib/config/` | Runtime-конфигурация, ключи настроек, темы, маршруты. |
+| `lib/pages/` | Экраны. Часто логика находится в `foo.dart`, разметка — в `foo_view.dart`. |
+| `lib/widgets/` | Переиспользуемые UI-компоненты и layout-компоненты. |
+| `lib/utils/` | Интеграционный слой: SDK extensions, HTTP, push, файлы, вход, VoIP, БД. |
+| `lib/l10n/` | ARB-переводы и генерируемая Flutter-локализация. |
+| `assets/` | Логотипы, звуки, emoji SAS, web-артефакты Vodozemac. |
+| `test/` | Widget/unit tests. |
+| `integration_test/` | Сквозные сценарии и тестовая конфигурация Synapse. |
+| `android/`, `ios/`, `linux/`, `macos/`, `windows/`, `web/` | Flutter runners и платформенная конфигурация. |
+| `scripts/` | Сборка, подготовка web, интеграционных тестов и релизные операции. |
 
-- **Matrix** — открытая спецификация: Client-Server API, Server-Server federation API, события комнат, идентификаторы и E2EE;
-- **Synapse** — одна из реализаций Matrix homeserver;
-- **FluffyChat** — Matrix-клиент и не должен зависеть исключительно от Synapse. Он может подключаться к совместимому homeserver другой реализации;
-- клиент обычно обращается к `/_matrix/client/...`; federation между серверами работает отдельно и клиентом напрямую не реализуется.
+### Типичная структура экрана
 
-Основные идентификаторы:
+Проект не следует строгой Clean Architecture с обязательными слоями
+`domain/data/presentation`. Чаще используется практичная Flutter-схема:
 
-| Объект | Пример | Смысл |
+```text
+chat.dart       StatefulWidget + State-контроллер, команды и локальное состояние
+chat_view.dart  build/UI, читает свойства и вызывает методы контроллера
+widgets/...     небольшие части экрана
+utils/...       общая или SDK-специфичная логика
+```
+
+Например, `ChatPage` находит `Room`, затем создаёт `ChatPageWithRoom`, а его
+`State` называется `ChatController`. Контроллер держит `Timeline`, выбранные
+события, reply/edit/thread state, scroll/focus controllers и методы отправки.
+Это **controller-as-State**, а не отдельный глобальный BLoC.
+
+## 3. Архитектура и запуск приложения
+
+### 3.1 Последовательность старта
+
+1. `main()` определяет integration-test mode.
+2. На Android координирует основной и push-isolate.
+3. На web нормализует URL hash для OIDC.
+4. Вызывает `WidgetsFlutterBinding.ensureInitialized()`.
+5. `AppSettings.init()` открывает `SharedPreferences` и на web подмешивает
+   значения из `config.json`.
+6. Инициализируется `flutter_vodozemac` — native/WASM crypto backend SDK.
+7. `ClientManager.getClients()` читает имена аккаунтов, создаёт для каждого
+   Matrix `Client`, подключает БД и восстанавливает сессии.
+8. В обычном foreground mode `startGui()` читает PIN/biometrics из secure
+   storage, дожидается загрузки rooms/account data первого клиента и вызывает
+   `runApp(FluffyChatApp(...))`.
+9. `FluffyChatApp` строит `MaterialApp.router`; над содержимым располагаются
+   `AppLockWidget` и application coordinator `Matrix`.
+
+В detached Android mode UI сразу не создаётся: клиенты запускаются без online
+presence для обработки фоновых push, а `AppStarter` поднимет GUI при переходе
+приложения в активное состояние.
+
+### 3.2 Основные слои ответственности
+
+```mermaid
+flowchart TB
+  UI[Pages and Widgets] --> C[State controllers / MatrixState]
+  C --> SDK[matrix Dart SDK]
+  SDK --> DB[(MatrixSdkDatabase)]
+  SDK --> CRYPTO[Vodozemac / Matrix E2EE]
+  SDK --> API[Matrix Client-Server API]
+  API --> HS[Synapse homeserver]
+  C --> PREFS[(SharedPreferences)]
+  C --> SECURE[(OS secure storage)]
+  C --> PLATFORM[Push / media / WebRTC / OS plugins]
+```
+
+- **UI** не формирует Matrix HTTP-запросы вручную; он работает с моделями и
+  методами SDK (`Client`, `Room`, `Timeline`, `Event`).
+- **Dart Matrix SDK** содержит основную протокольную и криптографическую логику.
+- **FluffyChat glue code** связывает SDK с Flutter lifecycle, UI, push,
+  платформенными API и продуктовыми настройками.
+- **Локальная БД** — offline cache и постоянное состояние клиента, но не
+  самостоятельный источник истины для всей Matrix-сети. История согласуется с
+  homeserver через sync.
+
+## 4. State Management
+
+### 4.1 Здесь нет одного глобального Redux/BLoC
+
+State Management гибридный. Это ключевой момент для чтения проекта:
+
+| Масштаб состояния | Механизм | Пример |
 |---|---|---|
-| User ID (MXID) | `@alice:example.org` | пользователь и его домашний сервер |
-| Room ID | `!opaqueId:example.org` | стабильный технический ID комнаты |
-| Alias | `#team:example.org` | человекочитаемая ссылка на комнату |
-| Event ID | `$opaqueEventId` | идентификатор события |
-| MXC URI | `mxc://example.org/mediaId` | ссылка Matrix на медиа |
-| Device ID | `ABCDEF` | конкретная сессия/устройство пользователя |
+| Локальное состояние экрана | `StatefulWidget`, `State`, `setState` | ввод и selection в `ChatController`, фильтры списка комнат |
+| Реактивные данные SDK | `Stream`, `StreamBuilder`, подписки | sync, room updates, login state, notifications, verification |
+| Одно async-вычисление | `FutureBuilder`, `AsyncSnapshot` | профиль, устройства, архив комнат |
+| Небольшая observable-модель | `ValueNotifier`, `ValueListenableBuilder` | `SignInViewModel`, проигрываемое voice message |
+| Application scope | пакет `provider` | `MatrixState` доступен через `Matrix.of(context)` |
+| Постоянные настройки | `AppSettings` + `SharedPreferences` | тема, UI-флаги, Matrix behavior |
+| Навигационное состояние | `GoRouter`/URL | активная комната, event, space, вложенный экран |
 
-Сообщение — не отдельная «строка в чате», а событие `m.room.message` в графе событий комнаты. Название, участники, права и включение шифрования — тоже state events. Поэтому `Room` и `Timeline` являются центральными моделями.
+`Provider` здесь не является полноценным repository/state framework. В
+`Matrix.build()` объект уже существующего `MatrixState` публикуется вниз по
+дереву, а `Matrix.of(context)` использует `listen: false`. Поэтому изменение
+поля `MatrixState` само по себе не перестраивает всех потребителей: нужны
+`setState`, специализированный notifier/stream либо навигация.
 
-## 3. Общая архитектура
+### 4.2 Что считать source of truth
 
-### 3.1 Слои
+- Для комнат, событий, пользователей, устройств и crypto state — модели и БД
+  Matrix SDK, обновляемые `/sync`.
+- Для текущего UI-жеста — `State` конкретного экрана.
+- Для выбранного аккаунта и общих lifecycle-процессов — `MatrixState`.
+- Для route-dependent state — URL/path/query parameters.
+- Для пользовательских предпочтений — `AppSettings`.
 
-В проекте нет жёстко оформленной Clean Architecture с `domain/data/presentation`. Фактически используются следующие слои:
+Не стоит копировать список событий из `Timeline` в собственный глобальный store:
+это создаст второй источник истины. Лучше подписываться на API Timeline/Room.
 
-| Слой | Каталоги/файлы | Ответственность |
-|---|---|---|
-| Entry point | `lib/main.dart` | Flutter binding, настройки, crypto runtime, клиенты, foreground/background режим |
-| App composition | `lib/widgets/fluffy_chat_app.dart`, `lib/widgets/matrix.dart` | тема, router, app lock, глобальный Matrix-контекст, подписки |
-| Navigation/config | `lib/config/` | маршруты, темы, runtime-настройки |
-| Features/pages | `lib/pages/<feature>/` | экран, контроллер состояния, действия пользователя |
-| Shared UI | `lib/widgets/` | переиспользуемые виджеты и диалоги |
-| Infrastructure | `lib/utils/` | создание SDK Client, БД, HTTP, push, файлы, VoIP, platform abstraction |
-| Protocol SDK | пакет `matrix` | Matrix API, sync, локальные модели, timeline, E2EE |
-| Native crypto | `flutter_vodozemac` | безопасные примитивы Olm/Megolm через Vodozemac |
+### 4.3 Жизненный цикл реактивных данных
 
-Это прагматичная feature-oriented архитектура: код конкретной функции находится рядом, но UI-контроллер иногда напрямую вызывает SDK. Для небольшого изменения это удобно; для Junior важно не искать обязательные repository/use-case слои — их здесь в классическом виде нет.
-
-### 3.2 Модель страницы «controller + view»
-
-Часто feature разделён на:
+Пример получения нового сообщения:
 
 ```text
-chat.dart       → ChatPage + StatefulWidget + ChatController
-chat_view.dart  → Stateless UI, получающий ChatController
+Synapse long-poll/sliding sync response
+  → matrix SDK разбирает event
+  → сохраняет/обновляет локальную БД и Room/Timeline
+  → SDK Stream посылает notification
+  → StreamBuilder/подписка инициирует rebuild
+  → widget читает обновлённый Timeline и рисует Event
 ```
 
-`State<T>` играет роль view model/controller: хранит локальные поля, вызывает `setState`, выполняет async-операции SDK. `build()` обычно делегируется отдельному `...View(this)`. Такое разделение уменьшает размер визуального файла, но контроллер всё ещё связан с Flutter (`BuildContext`, dialogs, widgets), то есть это не независимый domain ViewModel.
-
-## 4. Запуск приложения
-
-Последовательность `main()`:
-
-1. Определяется режим integration test.
-2. На Android создаётся `ReceivePort`, координирующий основной и push-isolate.
-3. На Web исправляется hash для OIDC callback.
-4. Инициализируется `WidgetsFlutterBinding`.
-5. `AppSettings.init()` открывает `SharedPreferences` и, на Web, при необходимости читает `config.json`.
-6. Инициализируется Vodozemac (`vod.init`) — native/WASM crypto backend.
-7. В Android detached/background режиме создаются клиенты без GUI, отключается online presence, запускается обработка push.
-8. В foreground `ClientManager.getClients()` восстанавливает все локальные аккаунты и инициализирует SDK.
-9. До `runApp` ожидается первичная загрузка комнат и account data первого клиента.
-10. `FluffyChatApp` строит `MaterialApp.router`, тему, app lock и `Matrix` provider.
-
-Упрощённо:
+Для команды пользователя направление обратное:
 
 ```text
-main
- ├─ AppSettings.init
- ├─ Vodozemac.init
- ├─ ClientManager.getClients
- │   ├─ create Client
- │   ├─ open MatrixSdkDatabase
- │   └─ client.initWithRestore
- └─ startGui
-     └─ FluffyChatApp
-         └─ MaterialApp.router
-             └─ AppLockWidget
-                 └─ Matrix (global integration state)
-                     └─ current route/page
+onPressed → controller method → Room/Client SDK method
+  → локальный pending event / HTTP request
+  → server acknowledgement и последующий sync
+  → окончательный event state → rebuild
 ```
 
-Особенность: запуск может быть **headless/background-first** на Android. Поэтому нельзя бездумно переносить раннюю инициализацию в UI — push isolate тоже нуждается в части инфраструктуры.
+### 4.4 Практические правила при добавлении state
 
-## 5. State Management
+1. Если значение нужно только одному экрану — начинайте с поля `State` и
+   `setState`.
+2. Если данные уже предоставляет SDK как stream — не оборачивайте их в ещё один
+   глобальный store без причины.
+3. Если несколько далёких экранов должны менять application service — добавьте
+   явно ограниченную ответственность в `MatrixState` либо отдельный provider.
+4. Освобождайте `StreamSubscription`, `Timer`, `FocusNode`, controller и
+   notifier в `dispose()`.
+5. После `await` перед использованием `context` проверяйте `mounted`.
+6. Не храните секреты в `SharedPreferences` и не помещайте чувствительные
+   значения в route query.
 
-### 5.1 Здесь нет одного глобального Redux/BLoC
+## 5. Routing
 
-State management гибридный:
+Навигация построена на `go_router`. Статический `GoRouter` объявлен **вне
+`build()`**, чтобы hot reload не сбрасывал текущий путь. `MaterialApp.router`
+получает его как `routerConfig`.
 
-1. **`StatefulWidget` + `setState`** — локальное состояние feature;
-2. **`Provider<MatrixState>`** — доступ к глобальному integration state;
-3. **SDK streams + `StreamBuilder`** — реакция на sync/room changes/notifications;
-4. **`FutureBuilder`** — ожидание timeline и разовых загрузок;
-5. **`SharedPreferences`** — персистентные пользовательские настройки;
-6. **`ValueNotifier`/listenables** используются точечно, например темами;
-7. состояние маршрута хранит `GoRouter`.
+### 5.1 Главные ветви
 
-Пакет `provider` здесь не создаёт дерево `ChangeNotifier`. `MatrixState` — обычный `State<Matrix>`, который публикуется через:
+| Route | Экран/назначение |
+|---|---|
+| `/` | Redirect на `/rooms` или `/home` по login state. |
+| `/home` | Intro и вложенные sign-in/sign-up/login routes. |
+| `/logs`, `/configs` | Диагностические экраны. |
+| `/backup` | Bootstrap/recovery после входа. |
+| `/rooms` | Список комнат. |
+| `/rooms/:roomid` | Timeline конкретной комнаты. |
+| `/rooms/archive` | Архив/покинутые комнаты. |
+| `/rooms/newprivatechat`, `/rooms/newgroup`, `/rooms/newspace` | Создание диалога, группы или Space. |
+| `/rooms/settings/...` | Настройки приложения, homeserver, security, devices и т. п. |
+| `/rooms/:roomid/details/...` | Детали, участники, permissions/access. |
+| `/rooms/:roomid/encryption` | Состояние E2EE комнаты. |
+| `/rooms/:roomid/search` | Поиск в комнате. |
 
-```dart
-Provider(create: (_) => this, child: widget.child)
-```
+Полный и актуальный список всегда следует читать в `lib/config/routes.dart`.
 
-и читается без подписки:
+### 5.2 Guards и redirects
 
-```dart
-Matrix.of(context).client
-```
+- `loggedInRedirect`: уже вошедшего пользователя уводит с auth route в
+  `/rooms`.
+- `loggedOutRedirect`: защищённый route отправляет неавторизованного
+  пользователя в `/home`.
+- Корневой redirect проверяет все клиенты (`any(client.isLogged())`).
+- Глобальный redirect обрабатывает content sharing и Matrix deep links.
 
-Следовательно, сам `Provider` **не перестраивает** dependents при каждой перемене клиента. Перестройки обеспечиваются `setState`, router и stream/future builders.
+Это клиентская защита UX, а не security boundary: сервер всё равно проверяет
+access token и permissions каждого API-запроса.
 
-### 5.2 Три масштаба состояния
+### 5.3 Path, query, fragment и `extra`
 
-#### Глобальное/integration state — `MatrixState`
+- `:roomid` — обязательный path parameter.
+- `?event=...`, `?spaceId=...` — необязательное адресуемое состояние.
+- fragment применяется для переданного deep link.
+- `state.extra` передаёт уже созданные runtime-объекты (`Client`, `Timeline`).
 
-Хранит и координирует:
+`extra` удобно, но оно не переживает обычный reload/deep link на web. Поэтому
+экран должен уметь восстановить основную сущность по ID; `ChatPage` именно так
+получает комнату по `roomId`, если готового `Timeline` нет.
 
-- список SDK-клиентов (multi-account);
-- индекс активного клиента и bundles аккаунтов;
-- временный login client;
-- подписки на запросы ключей и верификацию устройств;
-- logout и UIA-запросы;
-- push/notifications и VoIP plugin;
-- lifecycle foreground/background;
-- пароль, кешируемый в памяти на 10 минут для UIA;
-- переходы router после login/logout.
+### 5.4 Адаптивные ShellRoute
 
-#### Feature state — `State` конкретной страницы
+В широком режиме `ShellRoute` строит `TwoColumnLayout`: слева остаётся список
+комнат, справа — активная страница. Настройки имеют второй nested shell со своим
+master/detail layout. На узком экране child занимает весь экран. Таким образом,
+URL и бизнес-навигация едины, меняется только композиция представления.
 
-Например `ChatController` хранит:
+Для shell route намеренно используется страница без transition: условная
+перестройка по `MediaQuery` иначе может кратковременно создать два child с одним
+`GlobalKey`.
 
-- `Room`, `Timeline`, текущий thread;
-- выбранные события, reply/edit event;
-- scrolling, drag-and-drop, emoji picker;
-- typing timers;
-- pending input и async initialization.
+## 6. Matrix SDK, сеть и синхронизация
 
-Он вызывает методы `Room`/`Timeline`, а UI получает controller. Аналогично устроены login, settings, new group и другие функции.
+Главная зависимость — пакет `matrix`. `ClientManager.createClient()` создаёт
+отдельный `Client` для каждой локальной учётной записи и задаёт:
 
-#### Server/SDK state
+- custom HTTP client;
+- локальную `MatrixSdkDatabase`;
+- password и SSO login types;
+- emoji/numeric key verification;
+- native crypto implementations;
+- dehydrated devices;
+- стратегию передачи ключей (`shareKeysWith`);
+- soft logout callback и таймаут отправки timeline event.
 
-`matrix` SDK является фактическим источником истины о комнатах и событиях. `/sync` обновляет локальную БД и in-memory модели; UI слушает SDK streams. Не следует дублировать весь список сообщений в отдельный Flutter store.
+### 6.1 Важные модели SDK
 
-### 5.3 Как проходит изменение
+- `Client` — сессия одного Matrix-устройства: homeserver, access token, sync,
+  rooms, crypto и account data.
+- `Room` — локальное представление комнаты и команды над ней.
+- `Timeline` — загруженное окно событий комнаты, пагинация и live updates.
+- `Event` — сообщение или state event. Matrix-комната фактически является
+  последовательностью событий, а не набором специальных REST-сущностей.
+- `User`/room member — участие пользователя в конкретной комнате.
 
-Пример входящего события:
+### 6.2 Sync
 
-```text
-Synapse
-  → /sync response
-  → matrix Client обновляет БД, Room и Timeline
-  → SDK публикует stream event
-  → StreamBuilder/подписка получает update
-  → Flutter перестраивает нужный участок UI
-```
+После восстановления сессии SDK синхронизирует изменения с homeserver. Sync
+token позволяет серверу вернуть дельту после предыдущего ответа. Limited
+timeline означает, что между локальной и новой частью истории есть разрыв;
+историю требуется догрузить. На mobile `MatrixState` меняет background sync и
+стратегию запроса истории в зависимости от lifecycle.
 
-Пример локального действия:
+### 6.3 State events и timeline events
 
-```text
-нажатие Send
-  → метод ChatController
-  → Room.send...
-  → SDK шифрует (если надо), отправляет HTTP request
-  → local echo появляется в timeline
-  → server event/sync подтверждает результат
-  → UI обновляется из timeline stream
-```
+- **Timeline event** обычно описывает действие во времени: сообщение, реакцию,
+  редактирование, redaction.
+- **State event** имеет пару `(type, state_key)` и задаёт текущее состояние:
+  имя комнаты, membership, power levels, encryption и т. п.
 
-### 5.4 Практические правила изменения state
+Редактирование в Matrix — не мутация старой строки на сервере, а новое событие с
+relation; удаление — redaction event. UI/SDK вычисляют эффективное отображение.
 
-- Временный флаг одного экрана — поле `State` + `setState`.
-- Matrix-данные — получать из `Client`/`Room`/`Timeline`, подписываться на поток.
-- Настройка, переживающая перезапуск — добавить типизированный ключ в `AppSettings`.
-- Общеприложенческая интеграция — осторожно расширять `MatrixState`.
-- Всегда отменять `StreamSubscription` и `Timer` в `dispose`; в `MatrixState` для этого есть `_cancelSubs`.
-- После `await` перед использованием `context` проверять `mounted`.
-- Не выполнять сетевой вызов непосредственно в `build()`; исключение — правильно кешированный `Future`, иначе он стартует при каждой перестройке.
+### 6.4 Сетевой слой
 
-## 6. Routing
+Приложение передаёт SDK `CustomHttpClient`. В зависимости от платформы он может
+использовать подходящую HTTP-реализацию (включая Cronet на поддерживаемых native
+целях). Медиа адресуются URI вида `mxc://...`; виджеты/extensions преобразуют их
+в authenticated download/thumbnail requests.
 
-### 6.1 Библиотека и корень
+Не смешивайте:
 
-Используется декларативный `go_router`. Статический `GoRouter` находится вне `build`, чтобы hot reload не сбрасывал текущий URL. `MaterialApp.router` получает `routerConfig`.
-
-Маршруты объявлены централизованно в `lib/config/routes.dart`. Основные ветки:
-
-```text
-/
-├─ /home
-│  ├─ sign_in
-│  ├─ sign_up
-│  └─ login
-├─ /logs
-├─ /configs
-├─ /backup
-└─ /rooms                         (auth required)
-   ├─ archive[/:roomid]
-   ├─ newprivatechat
-   ├─ newgroup
-   ├─ newspace
-   ├─ settings/...
-   └─ :roomid                     (chat and nested room tools)
-```
-
-Полный список следует читать в `AppRoutes.routes`, потому что settings и room имеют много вложенных экранов.
-
-### 6.2 Guards/redirects
-
-- `/` проверяет наличие хотя бы одного logged-in client и ведёт в `/rooms` либо `/home`;
-- `loggedInRedirect` не даёт авторизованному пользователю снова пройти login flow;
-- `loggedOutRedirect` защищает комнаты и настройки;
-- глобальный redirect игнорирует URI content-sharing и преобразует Matrix deep link в `/rooms/newprivatechat#...`.
-
-Это client-side guards, а не механизм безопасности: сервер всё равно обязан проверить access token и права.
-
-### 6.3 ShellRoute и адаптивный master-detail
-
-`ShellRoute` оборачивает дочернюю страницу. На широком экране используется `TwoColumnLayout`:
-
-- слева `ChatList`, справа выбранная комната;
-- аналогично settings list + выбранная настройка;
-- на телефоне показывается один экран и обычная навигация.
-
-Один и тот же URL поэтому может иметь разную композицию UI в зависимости от ширины, но остаётся deep-linkable.
-
-### 6.4 Передача данных
-
-- стабильные идентификаторы передаются в path: `:roomid`;
-- необязательные фильтры — query (`event`, `spaceId`);
-- deep link — fragment;
-- уже открытый `Timeline` может передаваться через `state.extra` для оптимизации.
-
-`extra` не стоит считать персистентным: после web refresh объект пропадёт. Страница обязана уметь восстановиться по URL/SDK state, если маршрут рассчитан на refresh.
-
-### 6.5 Переходы
-
-Общие `defaultPageBuilder`/`noTransitionPageBuilder` унифицируют platform transitions. Shell route намеренно не анимируется: комментарий предупреждает о двойном рендере одного `GlobalKey` при смене responsive layout.
+- homeserver URL — база Client-Server API;
+- Matrix ID `@alice:example.org` — глобальный идентификатор пользователя;
+- room ID `!opaque:example.org`;
+- room alias `#readable:example.org`;
+- `mxc://server/mediaId` — Matrix content URI.
 
 ## 7. Хранение данных
 
-Здесь несколько хранилищ с разными задачами.
+В клиенте несколько независимых механизмов хранения.
 
-### 7.1 Матрица хранилищ
+### 7.1 MatrixSdkDatabase
 
-| Данные | Механизм | Где |
-|---|---|---|
-| комнаты, события, sync token, аккаунт, crypto state | `MatrixSdkDatabase` | IndexedDB-подобное web storage или SQLite/SQLCipher native |
-| имена локальных SDK clients | `SharedPreferences` | ключ `im.fluffychat.store.clients` |
-| UI-настройки | `SharedPreferences` через `AppSettings` | key-value |
-| ключ шифрования локальной БД | `flutter_secure_storage` | Keychain/Keystore/libsecret и т. п. |
-| PIN app lock и biometric flag | `flutter_secure_storage` | отдельные secure keys |
-| media cache | файловая cache/temp directory | лимит файла и удаление через SDK DB policy |
-| Web runtime config | `config.json` → defaults в preferences | загружается при старте |
+`flutterMatrixSdkDatabaseBuilder(clientName)` создаёт БД на каждый client name.
+Она хранит восстановимую сессию SDK, комнаты, события, account/crypto data и
+offline cache.
 
-### 7.2 MatrixSdkDatabase
+| Платформа | Реализация/место |
+|---|---|
+| Web | `MatrixSdkDatabase.init(clientName)`; браузерное persistent storage, запрашивается `navigator.storage.persist()`. |
+| Native | SQLite через `sqflite_common_ffi`; файл `<clientName>.sqlite` в application support/library/app-group каталоге. |
 
-`ClientManager.createClient()` передаёт SDK результат `flutterMatrixSdkDatabaseBuilder(clientName)`. Для каждого локального аккаунта создаётся собственная БД `<clientName>.sqlite`.
+На native создаётся `SQfLiteEncryptionHelper`, который применяет SQLCipher key
+через `PRAGMA key`. Проектовый hook выбирает SQLCipher как SQLite source.
+Существующие незашифрованные базы переводятся helper-ом в шифрованный формат,
+а старое расположение файла мигрируется.
 
-На native/desktop:
+Если открыть БД не удалось, builder логирует ошибку, показывает notification,
+удаляет повреждённый файл на native и создаёт базу заново. Это повышает
+восстанавливаемость, но локально не синхронизированные данные/ключи могут быть
+потеряны; recovery/backup поэтому принципиальны.
 
-1. определяется application support/library directory;
-2. мигрируется старое расположение файла;
-3. создаётся `sqflite_common_ffi` factory;
-4. при наличии cipher применяется SQLCipher `PRAGMA key`;
-5. БД передаётся `MatrixSdkDatabase.init`;
-6. file storage имеет `maxFileSize` 10 MB и политику удаления через 30 дней.
-
-На Web вызываются `navigator.storage.persist()` и `MatrixSdkDatabase.init(clientName)` без нативного SQLite path. Конкретное браузерное хранилище инкапсулировано Matrix SDK; браузер всё равно может применить свои quota/eviction rules.
-
-Если native БД не открылась, builder логирует ошибку, пытается уведомить пользователя, удаляет файл и создаёт БД заново. Это обеспечивает восстановление запуска ценой локального кеша; серверные данные можно синхронизировать снова, однако локальные crypto/session данные требуют особенно осторожного отношения и recovery/backup.
-
-### 7.3 Шифрование БД «at rest»
+### 7.2 Ключ шифрования локальной БД
 
 `getDatabaseCipher()`:
 
-- читает пароль `database_password` из secure storage;
-- если его нет, генерирует 32 случайных байта через `Random.secure()` и кодирует Base64URL;
-- на iOS использует App Group и мигрирует legacy key;
-- если secure storage недоступно, возвращает `null` и показывает предупреждение — БД откроется без SQLCipher.
+1. читает `database_password` из `flutter_secure_storage`;
+2. при первом запуске генерирует `Random.secure()` 32 случайных байта;
+3. сохраняет base64url-представление в Keychain/Keystore/libsecret-подобное
+   защищённое хранилище платформы;
+4. на iOS использует app group и умеет мигрировать legacy key;
+5. если secure storage недоступен, возвращает `null` и предупреждает, что база
+   не зашифрована.
 
-Это **не E2EE Matrix**. SQLCipher защищает локальный файл на диске; E2EE защищает содержимое события между устройствами.
+Это **encryption at rest**, отдельное от Matrix E2EE.
 
-### 7.4 SharedPreferences
+### 7.3 SharedPreferences / `AppSettings`
 
-`AppSettings<T>` — enum с key/default value и typed extensions для `bool`, `String`, `int`, `double`. Там находятся тема, homeserver default, typing/read receipt preferences, push gateway, timeout, UI filters и feature flags.
+Здесь находятся небольшие несекретные preferences: theme/цвет, уведомления,
+рендер HTML, отправка typing/read receipts, default homeserver, активные фильтры,
+список `clientName` для multi-account и т. п.
 
-`SharedPreferences` нельзя использовать для секретов: storage предназначен для удобных настроек. Access tokens/crypto material хранит SDK database, а её disk key — secure storage.
+`AppSettings` — typed enum-like facade с default value и `setItem`. На web при
+первом старте настройки могут быть заполнены из `config.json`; уже сохранённое
+значение имеет приоритет. `config.sample.json` показывает доступный deployment
+override, но текущим источником истины остаётся `AppSettings.values`.
 
-## 8. Криптография и сквозное шифрование
+`SharedPreferences` не гарантирует секретность. Access token и crypto material
+должны оставаться в SDK database/secure mechanisms, пароль app lock — в
+`FlutterSecureStorage`.
 
-> Криптографические примитивы реализует не UI FluffyChat, а Matrix SDK вместе с Vodozemac. Не следует писать собственную криптографию вместо этих компонентов.
+### 7.4 Файлы и media cache
 
-### 8.1 Уровни защиты
+Native builder создаёт `fluffychat_download_cache` в cache/temp или iOS app
+group. SDK получает лимит файла 10 MB для этого storage и срок удаления 30 дней.
+Выбранные пользователем downloads и временный кэш — разные понятия: очистка
+кэша не удаляет событие с homeserver.
 
-| Уровень | Что защищает | Механизм |
-|---|---|---|
-| transport | клиент ↔ homeserver | HTTPS/TLS (обязан корректно настроить оператор) |
-| Matrix E2EE | содержимое encrypted room между устройствами | Olm/Megolm и Matrix key management |
-| local at-rest | SQLite-файл | SQLCipher + случайный ключ в secure storage |
-| app access | открытие UI | PIN/biometrics через app lock |
-| key recovery | восстановление ключей на новом устройстве | Matrix secret storage/key backup/bootstrap |
+### 7.5 Серверное хранение
 
-Они не заменяют друг друга. Например TLS завершается на reverse proxy/Synapse, но E2EE не позволяет homeserver прочитать plaintext сообщения зашифрованной комнаты. При этом homeserver видит метаданные, необходимые протоколу: аккаунты, room membership, timing, размеры событий и т. п.
+Локальная БД FluffyChat и БД Synapse не заменяют друг друга:
 
-### 8.2 Olm и Megolm на понятном уровне
+| Данные | Клиент | Synapse |
+|---|---:|---:|
+| Зашифрованное событие комнаты | кэш | да |
+| Plaintext E2EE-сообщения | после расшифровки локально | нет, если E2EE корректно включён |
+| Olm/Megolm keys | да | только предназначенные для доставки key payloads/backup в зашифрованном виде |
+| Access/session state | да | серверная session/device запись тоже существует |
+| Незашифрованное сообщение | кэш | да, plaintext |
+| Загруженное media | кэш | да; при E2EE media ciphertext и ключ/IV идут в encrypted file metadata |
 
-- **Olm** создаёт защищённые device-to-device сессии и используется для небольших to-device payloads, включая доставку room keys.
-- **Megolm** оптимизирован для групповой комнаты: устройство-отправитель имеет outbound group session и шифрует последовательность сообщений; участникам безопасно передаётся соответствующий session key.
-- В encrypted room клиент отправляет `m.room.encrypted`, а plaintext message content получают только устройства с подходящим ключом.
-- Новое устройство не получает автоматически все старые plaintext messages: ему нужны forwarded keys или server-side encrypted key backup/recovery.
+## 8. Криптография и шифрование
 
-### 8.3 Vodozemac
+### 8.1 Три разных уровня
 
-`flutter_vodozemac` предоставляет binding к Vodozemac. В `main()` backend инициализируется до создания UI; Web загружает WASM из assets. `ClientManager.nativeImplementations` выбирает:
+1. **TLS/HTTPS** защищает транспорт клиент ↔ homeserver. Для production это
+   обязательно, но homeserver видит plaintext незашифрованной комнаты.
+2. **Matrix E2EE** защищает содержимое событий между устройствами участников.
+3. **SQLCipher at rest** защищает локальный SQLite-файл украденного/скопированного
+   устройства. Он не шифрует сетевой трафик.
 
-- Web Worker на Web (`native_executor.js`), чтобы тяжёлые операции не блокировали UI;
-- isolate/`compute` на native, с отдельной инициализацией Vodozemac.
+### 8.2 Olm, Megolm и Vodozemac
 
-Это одновременно security boundary библиотеки и performance-механизм.
+На концептуальном уровне Matrix использует:
 
-### 8.4 Устройства, доверие и verification
+- Olm-подобные pairwise encrypted sessions между устройствами для доставки
+  секретов/room keys;
+- Megolm group sessions для эффективного шифрования timeline комнаты;
+- device identity keys, one-time/fallback keys и подписи;
+- cross-signing для установления доверия между устройствами аккаунта.
 
-Каждый login создаёт Matrix device с собственными ключами. В проекте разрешены SAS verification methods:
+FluffyChat не реализует эти примитивы вручную. Dart Matrix SDK управляет
+протоколом, а `flutter_vodozemac`/Vodozemac предоставляет проверенную native/WASM
+реализацию криптографических операций. В `main()` backend инициализируется до
+работы клиентов; для web указан путь к WASM assets, для native SDK может вынести
+тяжёлую работу в isolate.
 
-- сравнение чисел;
-- emoji verification на поддерживаемых платформах.
-
-`MatrixState` слушает `onKeyVerificationRequest` и показывает `KeyVerificationDialog`. Пользователи должны сравнить данные по независимому доверенному контексту, а не просто нажать «совпадает».
-
-Для `onRoomKeyRequest` код автоматически пересылает ключ, только если запрос пришёл от одного из собственных clients и совпал `userId` и Curve25519 identity key. Это важно: key request нельзя удовлетворять любому устройству без проверки.
-
-### 8.5 Cross-signing, secure storage и bootstrap
-
-`lib/pages/bootstrap/` ведёт пользователя через:
-
-- настройку/восстановление security bootstrap;
-- recovery key или passphrase;
-- восстановление encrypted key backup.
-
-Cross-signing формирует доверие между master/self-signing/user-signing keys и устройствами. Secret storage хранит зашифрованные секреты в account data на homeserver; recovery key/passphrase разблокирует их. Это не пароль учётной записи.
-
-### 8.6 Что означает UTD
-
-UTD (unable to decrypt) означает, что ciphertext есть, а нужного session key локально нет или он пока не доступен. Причины:
-
-- устройство новое и backup не восстановлен;
-- sender ещё не поделился ключом;
-- устройство не верифицировано согласно key-sharing policy;
-- key request/backup/network завершился ошибкой;
-- локальное crypto storage удалено.
-
-При отладке нельзя «исправлять» UTD выводом ciphertext или отключением E2EE. Нужно проверить devices, verification, key backup и логи key requests.
-
-### 8.7 Ограничения модели угроз
-
-E2EE не спасает, если:
-
-- устройство или ОС скомпрометированы;
-- пользователь подтвердил чужое устройство;
-- plaintext попал в notification preview, screenshot, clipboard или незашифрованный export;
-- комната изначально не encrypted;
-- malicious client сам раскрывает plaintext.
-
-Для production используйте HTTPS, обновляйте клиент/Synapse, защищайте БД сервера и секреты, настройте retention/backup осознанно.
-
-## 9. Сеть, синхронизация и сообщения
-
-### 9.1 SDK Client
-
-`ClientManager.createClient` собирает `matrix.Client` и задаёт:
-
-- кастомный HTTP client;
-- Matrix database;
-- password + SSO login types;
-- verification methods;
-- Vodozemac native implementations;
-- dehydrated devices;
-- soft logout callback (опционально);
-- key-sharing policy;
-- network timeout и send-event timeout;
-- custom image resizer.
-
-Это главный composition root инфраструктуры Matrix. При изучении поведения SDK начните с параметров здесь, а затем переходите в исходники пакета `matrix` в pub cache.
-
-### 9.2 Sync
-
-После login SDK запускает Matrix sync loop. Концептуально клиент передаёт предыдущий `since` token и получает изменения:
-
-- joined/invited/left rooms;
-- timeline и state events;
-- ephemeral typing/read receipts;
-- to-device encrypted payloads;
-- device lists и account data.
-
-SDK сохраняет token и результат локально, обновляет модели и streams. Поэтому UI не опрашивает каждую комнату отдельно.
-
-В background lifecycle код меняет `backgroundSync`, presence и `requestHistoryOnLimitedTimeline`, чтобы балансировать актуальность и расход ресурсов.
-
-### 9.3 Timeline
-
-`Timeline` — представление событий комнаты с пагинацией, local echo, relations и дешифрованием. `ChatController` создаёт/принимает timeline, загружает историю порциями и фильтрует события для GUI. `Event` может быть message, state, reaction, redaction, membership change и т. д.
-
-Полезная трассировка отправки:
-
-1. `chat_input_row.dart`/`input_bar.dart` получает ввод;
-2. `ChatController` определяет reply/edit/thread context;
-3. вызывается API `Room`;
-4. SDK формирует event content, при E2EE шифрует и отправляет;
-5. local echo отображается немедленно;
-6. `/sync` возвращает каноническое событие/event id.
-
-### 9.4 Custom HTTP
-
-`lib/utils/custom_http_client.dart` выбирает platform implementation. Native вариант может использовать Cronet и platform networking; stub обеспечивает совместимую сборку. Для сетевой отладки полезно включить verbose logs, но нельзя публиковать access tokens, decrypted messages и ключевой материал.
-
-### 9.5 Federation не проходит через клиент
-
-Если Alice на `example.org` пишет Bob на `another.org`, FluffyChat общается со своим homeserver. Доставку между доменами выполняют homeserver через federation. Поэтому проблема может быть:
-
-- Client-Server API/TLS — клиент не логинится/не sync;
-- federation DNS/TLS/signing — локально всё работает, удалённый сервер недоступен;
-- room permissions — сервер доступен, но действие запрещено.
-
-## 10. Структура UI и адаптивность
-
-- Flutter Material используется как базовый UI framework.
-- `ThemeBuilder` и `FluffyThemes` строят light/dark/Material You схемы.
-- `TwoColumnLayout` даёт desktop/tablet master-detail.
-- platform checks сосредоточены в `PlatformInfos`.
-- adaptive dialogs/bottom sheets позволяют одному feature работать на mobile/desktop.
-- общие Matrix widgets: `Avatar`, `MxcImage`, event rendering, unread badges, presence.
-
-Правило чтения feature:
-
-1. найти route;
-2. открыть `<feature>.dart` — state/actions;
-3. открыть `<feature>_view.dart` — widget tree;
-4. найти обращения к `Matrix.of(context)`;
-5. перейти к `Room`/`Client` API в Matrix SDK;
-6. найти stream, который вызывает последующую перестройку.
-
-## 11. Аутентификация
-
-Поддерживаются password и SSO; есть отдельные flows для SSO и OIDC. Общий сценарий:
-
-1. пользователь вводит homeserver/domain;
-2. выполняется discovery (`.well-known`) и определяется base URL;
-3. клиент запрашивает поддерживаемые login flows;
-4. password login отправляется API либо browser-based SSO/OIDC возвращает callback;
-5. SDK сохраняет user ID, device ID, access/refresh information;
-6. client добавляется в список local clients;
-7. router переходит к security bootstrap/backup.
-
-UIA (User-Interactive Authentication) — серверный многошаговый flow для чувствительных действий: смена пароля, удаление устройства и т. п. `MatrixState` слушает `onUiaRequest` и вызывает централизованный handler. Временно кешируемый пароль очищается таймером через 10 минут.
-
-Multi-account реализован как несколько независимых `Client`/БД. `SharedPreferences` содержит только их локальные имена, а `MatrixState` выбирает активный.
-
-## 12. Уведомления и фоновые процессы
-
-Есть несколько путей:
-
-- Android background isolate/foreground service;
-- platform local notifications;
-- Web Notifications API;
-- UnifiedPush;
-- опциональный Firebase flow, добавляемый скриптом;
-- Matrix pusher, указывающий на push gateway.
-
-Важно понимать приватность push: gateway желательно передавать минимум данных (`event_id_only`), после чего клиент делает sync и дешифрует событие локально. Push не заменяет sync и не должен требовать передачи plaintext E2EE сообщения стороннему сервису.
-
-`MatrixState` подписывает каждый client на notifications, login/logout и lifecycle. При добавлении аккаунта нужно зарегистрировать подписки, при logout/dispose — отменить их, иначе появятся дублирующиеся уведомления и leaks.
-
-## 13. Медиа, VoIP и платформенные возможности
-
-### Медиа
-
-- `file_picker`, `file_selector`, `image_picker`, `cross_file` — выбор файлов;
-- `image`, `native_imaging`, `crop_image`, `video_compress` — подготовка изображений/видео;
-- `mime` — content type;
-- `MxcImage` и расширения SDK — download/decrypt/cache `mxc://`;
-- `blurhash_dart` — placeholder;
-- `video_player` + `chewie`, `just_audio` — playback;
-- `record` + Opus/CAF converter — voice messages;
-- `desktop_drop`, clipboard/share plugins — desktop/mobile UX.
-
-Encrypted attachment обычно загружается как ciphertext, а ключ/IV/hash находятся в encrypted event content. Поэтому обычный HTTP URL недостаточен: decrypt выполняется клиентом.
-
-### VoIP
-
-`flutter_webrtc`/`webrtc_interface` дают media transport, а `utils/voip/` и Matrix call events связывают signalling с комнатой. Для реальной работы за NAT часто нужен TURN (например Coturn); одного Synapse недостаточно для надёжного media path.
-
-### Геолокация и карты
-
-`geolocator`, `flutter_map`, `latlong2` обеспечивают location sharing/rendering. Следует учитывать platform permissions и приватность координат.
-
-## 14. Основные библиотеки
-
-Версии смотрите в `pubspec.yaml`; ниже — роль, а не полный API.
-
-### Ядро
-
-| Пакет | Роль |
-|---|---|
-| `flutter` | UI/runtime и multi-platform abstraction |
-| `matrix` | Client-Server API, sync, models, timeline, database/E2EE orchestration |
-| `flutter_vodozemac` | Olm/Megolm crypto backend |
-| `go_router` | declarative URL routing, redirects, nested shells |
-| `provider` | публикация `MatrixState` в widget tree |
-| `shared_preferences` | несекретные настройки и список clients |
-| `flutter_secure_storage` | DB password, app-lock secrets |
-| `sqflite_common_ffi` + SQLCipher hook | native encrypted SQLite |
-
-### Сеть, platform и system integration
-
-| Пакеты | Роль |
-|---|---|
-| `http`, `cronet_http` | HTTP и native transport |
-| `path_provider`, `path_provider_foundation`, `path` | DB/cache paths |
-| `device_info_plus`, `package_info_plus` | device/app metadata |
-| `url_launcher`, `flutter_web_auth_2` | external auth/browser links |
-| `local_auth` | biometrics для app lock |
-| `flutter_local_notifications`, `unifiedpush*`, `flutter_foreground_task` | push/background notifications |
-| `receive_sharing_intent`, `share_plus`, `pasteboard` | OS share/clipboard integration |
-
-### UI/content
-
-| Пакеты | Роль |
-|---|---|
-| `dynamic_color` | Material You colors |
-| `emoji_picker_flutter`, `badges`, `flutter_linkify`, `highlight` | chat/UI rendering |
-| `pretty_qr_code`, `qr_code_scanner_plus`, `qr_image` | QR login/share/verification UX |
-| `flutter_map`, `geolocator` | maps/location |
-| audio/video/image/file packages | capture, transform, select and play media |
-| `flutter_webrtc` | calls |
-
-### Development
-
-- `flutter_test` — unit/widget tests;
-- `integration_test` — end-to-end app tests;
-- `flutter_lints` и `dart_code_linter` — static analysis;
-- `license_checker` — dependency licensing;
-- `flutter_launcher_icons` — platform icon generation.
-
-## 15. Локализация, конфигурация и темы
-
-### Локализация
-
-ARB-файлы лежат в `lib/l10n/`. Flutter code generation создаёт типизированный API, доступный через `L10n.of(context)`. Новую пользовательскую строку нельзя хардкодить только на одном языке: добавьте ключ в source locale и переводы по процессу проекта.
-
-### Конфигурация
-
-- compile/repository defaults — `AppSettings` и `AppConfig`;
-- пользовательские overrides — `SharedPreferences`;
-- Web deployment overrides — `config.json` рядом с web app;
-- `config.sample.json` показывает допустимые поля.
-
-При чтении Web config значение применяется только если пользователь ещё не сохранил соответствующую настройку. Это сохраняет выбор пользователя поверх deployment default.
-
-### Темы
-
-`ThemeBuilder` передаёт `themeMode` и seed color в `FluffyThemes.buildTheme`. `MaterialApp.router` получает light/dark theme. Responsive column mode также определяется helper-методами темы, поэтому theme/layout здесь частично связаны.
-
-## 16. Развёртывание собственного Synapse
-
-Ниже — **учебная** Docker-схема. Перед production-развёртыванием сверяйте параметры с актуальной официальной документацией Synapse, фиксируйте конкретные версии образов, используйте PostgreSQL, резервные копии и reverse proxy. Не публикуйте development server напрямую.
-
-### 16.1 Выберите неизменяемое имя сервера
-
-Пусть MXID будет `@alice:matrix.example.org`. `server_name` входит в идентификаторы пользователей и комнат; менять его после начала эксплуатации сложно. Возможны две модели:
-
-- простой вариант: `server_name: matrix.example.org`, API там же;
-- красивый MXID `@alice:example.org`, а API на `matrix.example.org` — требует корректных `/.well-known/matrix/client` и `/.well-known/matrix/server` на `example.org`.
-
-Для первого стенда берите простой вариант.
-
-### 16.2 DNS и порты
-
-- A/AAAA `matrix.example.org` → публичный сервер;
-- наружу открыть 80/443 для ACME и HTTPS;
-- Synapse port `8008` оставить во внутренней Docker network;
-- TLS завершать на reverse proxy;
-- federation предпочтительно публиковать через 443 с корректным delegation; не выставлять админские endpoints без необходимости.
-
-Для локального стенда без federation можно использовать `localhost`, но мобильное устройство не считает `localhost` адресом компьютера, а self-signed TLS усложнит login. Удобнее настоящий test domain с доверенным сертификатом.
-
-### 16.3 Минимальная структура
+Упрощённая отправка E2EE-сообщения:
 
 ```text
-matrix-lab/
-├── compose.yaml
-├── .env
-├── synapse-data/       # homeserver.yaml появится здесь
-└── postgres-data/
+plaintext в ChatController
+  → SDK проверяет encryption state комнаты и outbound group session
+  → шифрует event content ключом Megolm session
+  → ключ session безопасно рассылается допустимым устройствам
+  → Synapse хранит и доставляет m.room.encrypted
+  → SDK получателя на доверенном устройстве получает room key
+  → локально расшифровывает event и отдаёт UI
 ```
 
-Создайте `.env` и не коммитьте его:
+### 8.3 Trust, verification и cross-signing
 
-```dotenv
-POSTGRES_DB=synapse
-POSTGRES_USER=synapse
-POSTGRES_PASSWORD=ЗАМЕНИТЕ_НА_ДЛИННЫЙ_СЛУЧАЙНЫЙ_СЕКРЕТ
-```
+Новый login создаёт новое Matrix-устройство. Пользователь сравнивает emoji или
+числа SAS (Short Authentication String) на двух устройствах. Совпадение
+подтверждает, что обмен ключами не подменён. `ClientManager` включает numeric
+verification везде, emoji — на поддерживаемых целях. `MatrixState` слушает
+`onKeyVerificationRequest` и показывает `KeyVerificationDialog`.
 
-Сначала сгенерируйте конфигурацию официальным образом (версию `X.Y.Z` замените на выбранный и проверенный тег, не используйте плавающий тег в production):
+Cross-signing позволяет доверенному устройству подписывать новое и переносить
+доверие на уровень аккаунта, а не вручную доверять каждой паре. UI security и
+device settings является оболочкой над SDK API для этих операций.
 
-```bash
-mkdir -p synapse-data postgres-data
+### 8.4 Room key requests и missing keys
 
-docker run --rm \
-  -v "$(pwd)/synapse-data:/data" \
-  -e SYNAPSE_SERVER_NAME=matrix.example.org \
-  -e SYNAPSE_REPORT_STATS=no \
-  matrixdotorg/synapse:X.Y.Z generate
-```
+Если устройство видит encrypted event, но не имеет нужного Megolm session key,
+оно не может показать plaintext. Причины: устройство вошло позже, отправитель не
+разрешил sharing, устройство не верифицировано, пропущен to-device event или нет
+backup.
 
-### 16.4 Compose
+`MatrixState` слушает `onRoomKeyRequest`. Запрос от другого локального клиента с
+тем же user ID и совпадающим identity key автоматически форвардится. Для других
+случаев решение принимает crypto policy SDK/user flow, а не UI «обходит» E2EE.
 
-```yaml
-services:
-  postgres:
-    image: postgres:17
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_INITDB_ARGS: --encoding=UTF8 --locale=C
-    volumes:
-      - ./postgres-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $POSTGRES_USER -d $POSTGRES_DB"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
+### 8.5 Backup/recovery и dehydrated devices
 
-  synapse:
-    image: matrixdotorg/synapse:X.Y.Z
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-    volumes:
-      - ./synapse-data:/data
-    ports:
-      # Для отладки bind только на loopback; reverse proxy обращается сюда.
-      - "127.0.0.1:8008:8008"
-```
+Encrypted key backup нужен, чтобы восстановить исторические Megolm keys на
+новом устройстве. Route `/backup` открывает bootstrap/recovery flow после login.
+`Client` создаётся с поддержкой dehydrated devices — сервер может хранить
+зашифрованное состояние неактивного устройства для более бесшовного входа.
 
-В `synapse-data/homeserver.yaml` настройте PostgreSQL вместо SQLite:
+Важно различать:
 
-```yaml
-database:
-  name: psycopg2
-  args:
-    user: synapse
-    password: "тот же длинный секрет"
-    database: synapse
-    host: postgres
-    cp_min: 5
-    cp_max: 10
-```
+- пароль Matrix-аккаунта;
+- recovery key/passphrase для key backup/secret storage;
+- PIN локального app lock;
+- случайный SQLCipher password.
 
-Не вставляйте второй ключ `database`, если он уже существует: замените сгенерированный блок. Проверьте также:
+Это разные секреты с разным назначением. Потеря recovery material при отсутствии
+старого устройства может сделать старые E2EE-сообщения необратимо нечитаемыми.
 
-```yaml
-public_baseurl: "https://matrix.example.org/"
-```
+### 8.6 Ограничения модели угроз
 
-Секреты signing key и registration/shared secrets храните с правами только для администратора и резервируйте. Утрата signing key критична для federation identity.
+- Скомпрометированный клиент до шифрования/после расшифрования видит plaintext.
+- Добавленное злоумышленником устройство опасно до обнаружения/отзыва; проверяйте
+  список устройств.
+- Push payload следует минимизировать: приложение поддерживает формат
+  `event_id_only`, после чего само забирает событие.
+- Скриншоты, clipboard, notifications и скачанный plaintext требуют отдельной
+  платформенной защиты.
+- Не отключайте TLS certificate verification ради локального удобства в
+  production.
 
-### 16.5 Reverse proxy и TLS
+## 9. Аутентификация и несколько аккаунтов
 
-Пример смысловой конфигурации Nginx:
+### 9.1 Discovery и login
 
-```nginx
-server {
-    listen 443 ssl http2;
-    server_name matrix.example.org;
+Sign-in flow выбирает homeserver, проверяет его capabilities/login flows, затем
+использует password либо SSO. Для web/mobile SSO/OIDC применяется browser redirect
+и deep link/callback. UIA (`User-Interactive Authentication`) обрабатывает
+многошаговые серверные проверки для чувствительных действий.
 
-    # ssl_certificate /.../fullchain.pem;
-    # ssl_certificate_key /.../privkey.pem;
+`SignInViewModel` — один из немногих явных MVVM-подобных участков: он наследует
+`ValueNotifier<SignInState>`, загружает список публичных homeserver, фильтрует его
+и хранит `AsyncSnapshot` загрузки.
 
-    client_max_body_size 100M;
+### 9.2 Multi-account
 
-    location ~ ^(/_matrix|/_synapse/client) {
-        proxy_pass http://127.0.0.1:8008;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header Host $host;
-        proxy_read_timeout 600s;
-    }
-}
-```
+- `SharedPreferences` хранит только список стабильных `clientName`.
+- На каждый client name создаётся отдельный `Client` и отдельная БД.
+- `MatrixState` выбирает активный client и поддерживает account bundles.
+- После успешного login временный candidate добавляется в список, регистрируются
+  подписки, он становится активным, затем router переходит в `/backup`.
+- При logout подписки отменяются, client удаляется из списка и очищается session
+  backup. Последний logout возвращает приложение к `/`.
 
-В Synapse настройте trusted proxy (`x_forwarded: true` у listener) строго согласно официальной документации и вашей topology. Не проксируйте весь `/_synapse/admin` публично без access controls. Ограничение upload size должно согласовываться в Synapse и proxy.
+`clientName` — локальный ключ экземпляра, а не Matrix user ID.
 
-### 16.6 Регистрация первого пользователя
+## 10. Сообщения, медиа, уведомления и звонки
 
-Безопаснее отключить открытую регистрацию и создать тестового пользователя admin-командой внутри контейнера:
+### 10.1 Timeline и composer
 
-```bash
-docker compose up -d
-docker compose exec synapse register_new_matrix_user \
-  -c /data/homeserver.yaml \
-  http://localhost:8008
-```
+`ChatController` концентрирует взаимодействие с комнатой:
 
-Команда интерактивно запросит имя, пароль и admin flag. Для автоматизации используйте секреты безопасно, не помещайте пароль в shell history/репозиторий.
+- получение/создание `Timeline` и пагинация истории;
+- send/edit/reply/redact/react;
+- threads и relations;
+- typing state с timers;
+- read marker/receipts;
+- selection и bulk actions;
+- drag-and-drop, file/image/location/audio sending.
 
-### 16.7 Проверки сервера
+Передача файлов проходит через picker/cross-file, MIME detection, preview/crop/
+resize/compress по типу и платформе, затем SDK media upload и message event.
+`image`, `native_imaging`, `video_compress`, `crop_image`, `blurhash_dart` и
+media widgets обслуживают эту цепочку.
 
-```bash
-curl -fsS https://matrix.example.org/_matrix/client/versions
-curl -fsS https://matrix.example.org/_matrix/federation/v1/version
+### 10.2 Push notifications
 
-docker compose logs -f synapse
-```
+Matrix pusher сообщает push gateway о новом событии; gateway доставляет FCM,
+UnifiedPush либо платформенный сигнал. FluffyChat регистрирует pusher, обрабатывает
+background isolate/service и показывает local notification через
+`flutter_local_notifications`. Web использует browser Notifications API.
 
-Второй endpoint проверяет публикацию federation API, но полноценную federation/delegation/TLS проверку лучше делать специализированным federation tester. Проверяйте также DNS, сертификат, `.well-known`, время системы и доступность с внешней сети.
+Push — сигнал о событии, а не источник состояния. После пробуждения клиент
+синхронизируется с homeserver. Это особенно важно для E2EE: plaintext не должен
+без необходимости уходить стороннему push provider.
 
-### 16.8 TURN для звонков
+### 10.3 VoIP
 
-Для лабораторных сообщений TURN не нужен. Для надёжного WebRTC разверните Coturn, откройте UDP/TCP relay range и задайте в Synapse:
+Экспериментальный `VoipPlugin` включается настройкой. Media plane использует
+`flutter_webrtc`/`webrtc_interface`, камера/микрофон управляются в `utils/voip`,
+а Matrix-события используются как signaling. `wakelock_plus` не даёт устройству
+заснуть во время сценария, `handy_window`/PiP помогают desktop/mobile UI.
 
-```yaml
-turn_uris:
-  - "turn:turn.example.org:3478?transport=udp"
-  - "turn:turn.example.org:3478?transport=tcp"
-turn_shared_secret: "ОТДЕЛЬНЫЙ_СЛУЧАЙНЫЙ_СЕКРЕТ"
-turn_user_lifetime: 1h
-turn_allow_guests: false
-```
+Matrix signaling и WebRTC media — разные уровни. Для звонков через сложные NAT
+в реальном развёртывании обычно нужен TURN; одного Synapse недостаточно.
 
-TLS TURN (`turns:`), firewall и advertised external IP зависят от окружения.
+## 11. Адаптивный UI, платформы и локализация
 
-### 16.9 Production checklist
+- Material 3/Material You, light/dark themes и dynamic system colors.
+- `FluffyThemes.isColumnMode(context)` выбирает mobile navigation либо
+  two-column desktop/tablet layout.
+- `PlatformInfos` централизует feature detection вместо разбросанных проверок
+  ОС.
+- `universal_html` закрывает web-specific APIs условно совместимым импортом.
+- ARB-файлы в `lib/l10n` генерируют `L10n`; строки UI не следует hardcode-ить.
+- Платформенные permissions и capabilities различаются: secure storage,
+  biometrics, background execution, file paths, notifications и emoji SAS могут
+  быть доступны не везде.
 
-- PostgreSQL вместо SQLite;
-- фиксированные image versions и план обновления;
-- HTTPS с доверенным сертификатом;
-- registration закрыта либо защищена token/captcha/approval;
-- rate limiting и firewall;
-- отдельный непривилегированный runtime user где возможно;
-- backups PostgreSQL, media store, signing keys и конфигурации;
-- тест восстановления backup;
-- monitoring диска, federation, DB connections, error rate;
-- политика retention/moderation/abuse reports;
-- SMTP для password reset, если нужен;
-- TURN для звонков;
-- privacy policy и защита логов;
-- регулярное чтение security advisories Synapse.
+## 12. Основные библиотеки
 
-## 17. Подключение FluffyChat к своему серверу
+Ниже не механический пересказ `pubspec.yaml`, а группировка по роли.
 
-### 17.1 Без изменения кода
+### 12.1 Основа
 
-Запустите приложение и укажите `matrix.example.org` в homeserver picker. Клиент выполнит discovery/login flow. Для локальной разработки:
-
-```bash
-flutter pub get
-flutter run
-```
-
-Потребуются Flutter и Rust, потому что crypto backend связан с Vodozemac. Для Web сначала выполните:
-
-```bash
-./scripts/prepare-web.sh
-flutter run -d chrome
-```
-
-Web требует CORS и HTTPS, особенно если app и homeserver на разных origins. Не отключайте browser security для обхода неправильной server configuration.
-
-### 17.2 Deployment default
-
-Чтобы ваш Web build предлагал свой homeserver, разместите рядом с `index.html` минимальный `config.json`:
-
-```json
-{
-  "defaultHomeserver": "matrix.example.org"
-}
-```
-
-Не копируйте все значения из sample без необходимости. Это default, а не жёсткая привязка. Для white-label также доступны application name, logo, website, privacy/TOS и colors.
-
-### 17.3 Локальная сеть
-
-Android emulator обращается к host не через `localhost` (часто используется специальный host alias), а физический телефон — через LAN IP/DNS. Но Matrix discovery, secure storage, SSO callback и Web обычно гораздо стабильнее тестировать с настоящим DNS + TLS.
-
-Никогда не добавляйте глобальное отключение проверки TLS в production client. Если нужен лабораторный CA, установите его только на тестовое устройство и документируйте риск.
-
-## 18. Отладка полного сценария
-
-### 18.1 Базовый сценарий
-
-Создайте **два пользователя и два устройства**, иначе нельзя полноценно изучить E2EE:
-
-1. Alice регистрируется/логинится во FluffyChat A.
-2. Bob логинится в другом профиле/устройстве/клиенте.
-3. Alice создаёт unencrypted test room — проверяет базовый sync.
-4. Alice создаёт encrypted room и приглашает Bob.
-5. Отправляются text, image, reply, reaction, edit, redaction.
-6. Проверяются typing, read receipts и offline delivery.
-7. Alice логинится на втором устройстве.
-8. Выполняется emoji/number verification.
-9. Настраивается key backup/recovery, затем восстанавливается на чистом профиле.
-10. Проверяется logout, soft logout и multi-account.
-
-### 18.2 Что наблюдать
-
-| Действие | Клиент | Synapse |
-|---|---|---|
-| login | route, новый `Client`, local DB | login request, device/access token |
-| open room | `Room`, `Timeline`, pagination | `/sync`, messages/context APIs |
-| send | local echo → confirmed event | send event и следующий sync |
-| E2EE send | key share + `m.room.encrypted` | ciphertext, to-device traffic |
-| verify | verification dialog/state machine | to-device verification events |
-| media | encrypt/upload, `mxc://`, cache | media repository request |
-| offline/online | lifecycle + sync resume | long-poll disconnect/reconnect |
-
-### 18.3 Полезные точки останова
-
-- `main()` и `startGui()`;
-- `ClientManager.getClients/createClient`;
-- `MatrixState.initMatrix/_registerSubs/setActiveClient`;
-- login submit/callback;
-- `ChatController` timeline initialization и send methods;
-- route redirects;
-- database builder/cipher;
-- notification background handlers.
-
-### 18.4 Логи и безопасность
-
-Во FluffyChat есть `/logs`, а SDK создаётся с verbose log level. Synapse:
-
-```bash
-docker compose logs --since=10m synapse
-```
-
-При публикации issue удаляйте:
-
-- access/refresh tokens;
-- passwords/recovery keys;
-- device/session keys;
-- decrypted message content;
-- personal MXIDs/room IDs/IPs, если они чувствительны.
-
-### 18.5 Типичные неисправности
-
-| Симптом | Проверить |
+| Библиотека | Роль |
 |---|---|
-| homeserver не найден | `.well-known`, base URL, DNS, JSON content type |
-| login работает только локально | public DNS/firewall/TLS/reverse proxy |
-| Web login блокируется | CORS, HTTPS mixed content, callback URL |
-| сообщения локально есть, federation нет | federation delegation, signing key, TLS, port/path |
-| UTD | device trust, key backup, key request, новый crypto store |
-| media 413 | proxy и Synapse upload limits |
-| звонок соединяется без звука/не соединяется | permissions, ICE candidates, TURN/firewall |
-| после reinstall старая история не расшифрована | recovery/key backup не восстановлен |
-| уведомления не приходят | pusher, gateway/UnifiedPush/FCM, background restrictions, sync |
+| `flutter`, `flutter_localizations` | UI framework, platform runners, i18n. |
+| `matrix` | Matrix Client-Server API, sync, модели, timeline, E2EE orchestration и БД SDK. |
+| `provider` | Публикация `MatrixState` в widget tree. |
+| `go_router` | Declarative URL routing, nested/shell routes, redirects, deep links. |
+| `async`, `collection` | Async helpers и безопасные операции над коллекциями. |
 
-## 19. Тестирование и качество кода
+### 12.2 Безопасность и локальные данные
 
-### 19.1 Команды
+| Библиотека | Роль |
+|---|---|
+| `flutter_vodozemac` | Matrix crypto primitives через native/WASM Vodozemac. |
+| `flutter_secure_storage` | SQLCipher key, app-lock data и другие малые секреты в OS vault. |
+| `sqflite_common_ffi` | Native SQLite/SQLCipher доступ для Matrix SDK database. |
+| `shared_preferences` | Несекретные настройки и список локальных client instances. |
+| `local_auth` | Биометрическая разблокировка приложения. |
+| `path`, `path_provider`, `path_provider_foundation` | Безопасный выбор application/cache directories. |
+
+### 12.3 Сеть, auth и интеграция ОС
+
+| Библиотека | Роль |
+|---|---|
+| `http`, `cronet_http` | HTTP и оптимизированный native transport. |
+| `flutter_web_auth_2` | Browser-based SSO/OIDC callbacks. |
+| `url_launcher` | Открытие внешних ссылок/auth URL. |
+| `flutter_local_notifications`, `unifiedpush*`, `flutter_foreground_task`, `flutter_new_badger` | Push/local notifications, background service, badge. |
+| `device_info_plus`, `package_info_plus` | Runtime сведения об устройстве/приложении. |
+| `receive_sharing_intent`, `share_plus`, `pasteboard` | OS share/clipboard integration. |
+
+### 12.4 Медиа и UX
+
+| Библиотека | Роль |
+|---|---|
+| `image_picker`, `file_picker`, `file_selector`, `cross_file`, `desktop_drop` | Выбор и drag-and-drop файлов. |
+| `image`, `native_imaging`, `crop_image`, `video_compress`, `blurhash_dart` | Обработка/preview изображений и видео. |
+| `video_player`, `chewie`, `just_audio`, `record`, `opus_caf_converter_dart` | Playback/recording аудио и видео. |
+| `flutter_webrtc`, `webrtc_interface` | Calls/media streams. |
+| `geolocator`, `flutter_map`, `latlong2` | Геопозиция и карта. |
+| `emoji_picker_flutter`, `badges`, `pretty_qr_code`, `qr_code_scanner_plus` | Composer и вспомогательный UI/QR flows. |
+| `html`, `flutter_linkify`, `highlight` | Sanitized/rich text, ссылки, code highlighting. |
+
+При изучении API библиотеки сверяйтесь с зафиксированной версией в
+`pubspec.lock`, а не только с последней документацией в интернете: API мог
+измениться.
+
+## 13. Тестирование
+
+### 13.1 Unit/widget tests
 
 ```bash
 flutter pub get
-dart format --output=none --set-exit-if-changed .
 flutter analyze
 flutter test
 ```
 
-Integration tests требуют Docker и подготовительный скрипт:
+`test/` содержит widget tests архива, homeserver picker, command hints и базового
+приложения. `test/utils/test_client.dart` помогает создать SDK client для теста.
+
+### 13.2 Integration tests
+
+Репозиторий уже содержит минимальный Synapse testbed:
 
 ```bash
 ./scripts/prepare_integration_test.sh
 flutter test integration_test/mobile_test.dart
 ```
 
-Скрипт поднимает предназначенное проектом тестовое окружение; не заменяйте его production Synapse и не запускайте destructive test against реальными данными.
+Скрипт:
 
-### 19.2 Виды тестов
+1. удаляет старый контейнер `synapse`;
+2. запускает `matrixdotorg/synapse:latest` с `tmpfs /data`;
+3. монтирует тестовые `homeserver.yaml`, logging config и открывает порт 80;
+4. ждёт `/_matrix/client/v3/login`;
+5. регистрирует двух тестовых пользователей.
 
-- unit tests — helpers/filtering/commands;
-- widget tests — Flutter tree и interaction;
-- integration tests — реальный пользовательский flow с backend;
-- manual matrix — mobile/desktop/web, encrypted/unencrypted, multi-device;
-- static analysis — типы, lints и lifecycle mistakes.
+Это **одноразовая тестовая среда**, не production: данные находятся в tmpfs,
+регистрация без verification включена, задан тестовый shared secret, HTTP без
+TLS, SQLite и floating tag `latest`.
 
-Для нового feature желательно отделять pure logic от `BuildContext`: её проще unit-test. UI side effects оставлять в controller/view и проверять widget/integration test.
+Сценарии находятся в `integration_test/flows`: authentication, basic messaging,
+chat backup и multi-account. Это хороший executable tour по пользовательским
+потокам.
 
-## 20. План изучения для Junior
+## 14. Запуск с локальным Synapse
 
-### Этап 1. Flutter-каркас
+### 14.1 Самый быстрый путь: встроенный testbed
 
-1. Прочитать `pubspec.yaml`.
-2. Пройти `main.dart` по шагам до `runApp`.
-3. Нарисовать widget tree `FluffyChatApp`.
-4. Разобрать `StatefulWidget`, `setState`, `StreamBuilder`, `FutureBuilder`, `Provider`.
-5. Запустить приложение с breakpoint.
+Требуются Flutter подходящей версии, Rust (для crypto/build tooling), Docker и
+свободный порт 80.
 
-**Результат:** понятно, кто создаёт router, Matrix context и SDK clients.
+```bash
+cd /path/to/fluffychat
+./scripts/prepare_integration_test.sh
+curl http://localhost/_matrix/client/versions
+docker logs -f synapse
+```
 
-### Этап 2. Навигация
+Учётные данные смотрите в `integration_test/data/integration_users.env`. Затем
+запустите клиент и в homeserver picker укажите URL:
 
-1. Прочитать `AppRoutes.routes` сверху вниз.
-2. Выписать URL для login, rooms, settings, room details.
-3. Сравнить телефон и wide window.
-4. Открыть deep link и web refresh.
+```bash
+flutter pub get
+flutter run
+```
 
-**Результат:** понятны `GoRoute`, `ShellRoute`, redirect, path/query/fragment/extra.
+Для desktop клиента обычно подходит `http://localhost`. В браузере возможны
+CORS/mixed-content ограничения, а из Android emulator `localhost` означает сам
+эмулятор: адрес host обычно `10.0.2.2`. В iOS Simulator обычно доступен host
+localhost; на физическом телефоне используйте LAN IP компьютера и разрешите
+cleartext только для development либо настройте HTTPS.
 
-### Этап 3. Matrix без E2EE
+Тестовая конфигурация имеет `server_name: localhost`. Нельзя просто заменить URL
+на произвольный IP после создания пользователей и ожидать, что Matrix IDs и
+federation domain изменятся: server name является частью идентичности сервера.
 
-1. Развернуть Synapse.
-2. Создать Alice/Bob.
-3. Проследить login и `/sync`.
-4. Создать незашифрованную room.
-5. Поставить breakpoints на создание timeline/send.
+Остановить среду:
 
-**Результат:** понятны `Client`, `Room`, `Timeline`, `Event` и local echo.
+```bash
+docker rm -f synapse
+```
 
-### Этап 4. Storage
+### 14.2 Более реалистичный постоянный стенд
 
-1. Изменить UI setting и найти его key.
-2. Найти список clients в SharedPreferences.
-3. Найти SQLite path на тестовой платформе.
-4. Понять, почему DB password хранится отдельно.
-5. Очистить app data и увидеть полную resync.
+Для учебного стенда, данные которого переживают restart, сначала сгенерируйте
+конфигурацию в отдельной директории:
 
-Не открывайте production SQLCipher DB небезопасными инструментами и не публикуйте её.
+```bash
+mkdir -p "$PWD/.local/synapse-data"
+docker run --rm -it \
+  -v "$PWD/.local/synapse-data:/data" \
+  -e SYNAPSE_SERVER_NAME=matrix.local.test \
+  -e SYNAPSE_REPORT_STATS=no \
+  matrixdotorg/synapse:latest generate
 
-### Этап 5. E2EE
+docker run -d --name fluffychat-synapse \
+  -v "$PWD/.local/synapse-data:/data" \
+  -p 8008:8008 \
+  matrixdotorg/synapse:latest
+```
 
-1. Создать encrypted room.
-2. Сравнить client plaintext и server event ciphertext.
-3. Добавить второе устройство.
-4. Верифицировать устройства.
-5. Воспроизвести UTD, затем восстановить backup.
-6. Разделить в конспекте TLS, SQLCipher и E2EE.
+Добавьте `matrix.local.test` в hosts/DNS так, чтобы **клиентское устройство**
+разрешало имя в IP Docker host. Создайте пользователя штатной командой Synapse:
 
-### Этап 6. Небольшая задача
+```bash
+docker exec -it fluffychat-synapse \
+  register_new_matrix_user -c /data/homeserver.yaml http://localhost:8008
+```
 
-Хорошие первые изменения:
+После этого укажите в FluffyChat `http://matrix.local.test:8008`. Для Android
+emulator hosts host-машины автоматически не наследуется; проще использовать
+доступное эмулятору имя/IP или локальный DNS.
 
-- UI-only настройка;
-- небольшой reusable widget;
-- улучшение empty/error state;
-- unit test pure helper;
-- новая строка локализации.
+**Не коммитьте** generated signing keys, registration secrets, БД и access
+tokens. Для воспроизводимости зафиксируйте конкретный Synapse image tag вместо
+`latest`.
 
-Перед изменением ответьте:
+### 14.3 Что необходимо для production-like стенда
 
-1. Кто source of truth?
-2. Как состояние переживает rebuild/restart?
-3. Какой stream инициирует UI update?
-4. Что происходит offline?
-5. Не раскрывает ли изменение plaintext/ключи/token?
-6. Работает ли mobile, desktop и web?
+Минимальный следующий шаг:
 
-## 21. Глоссарий и источники
+1. DNS-имена для Matrix server name и публичного client endpoint.
+2. Reverse proxy (например, nginx/Caddy/Traefik) и валидный TLS certificate.
+3. Корректный `public_baseurl` и `.well-known/matrix/client`; для федерации —
+   `.well-known/matrix/server` или корректный порт/делегирование.
+4. PostgreSQL вместо SQLite для серьёзной нагрузки.
+5. Persistent volumes, backup и проверенная процедура restore.
+6. Закрытая публичная регистрация либо verification/token policy.
+7. TURN server для надёжных WebRTC-звонков.
+8. Push gateway/UnifiedPush strategy, если проверяете background mobile push.
+9. Rate limits, log rotation, monitoring, обновления и секреты вне Git.
 
-### Глоссарий
+Synapse deployment и FluffyChat web deployment — два разных сервиса. Web build
+можно собрать так:
 
-- **Homeserver** — сервер, обслуживающий Matrix-аккаунт и комнаты.
-- **Synapse** — реализация homeserver.
-- **Client** — локальная SDK-сессия одного аккаунта/device.
-- **Sync** — поток изменений от homeserver к клиенту.
-- **Room state** — текущие state events комнаты.
-- **Timeline** — упорядоченное клиентское представление событий.
-- **Local echo** — временное отображение отправляемого события до подтверждения.
-- **E2EE** — end-to-end encryption.
-- **Olm/Megolm** — Matrix crypto ratchets для device-to-device/group messaging.
-- **SAS** — short authentication string для сравнения при verification.
-- **Cross-signing** — иерархия ключей доверия пользователя и устройств.
-- **SSSS/secret storage** — зашифрованное хранение recovery secrets в account data.
-- **UIA** — многоэтапная повторная аутентификация чувствительного действия.
-- **Pusher** — регистрация доставки push-сигнала через gateway.
-- **Federation** — обмен событиями между homeserver.
+```bash
+./scripts/prepare-web.sh
+flutter build web --release
+```
 
-### Что читать в репозитории
+Рядом с web assets можно отдать `config.json`, например:
 
-1. `README.md` — назначение, features, build.
-2. `pubspec.yaml` — зависимости и platforms.
-3. `lib/main.dart` — lifecycle/startup.
-4. `lib/widgets/fluffy_chat_app.dart` — composition и router host.
-5. `lib/widgets/matrix.dart` — глобальная интеграция с SDK.
-6. `lib/config/routes.dart` — navigation graph.
-7. `lib/utils/client_manager.dart` — создание и восстановление clients.
-8. `lib/utils/matrix_sdk_extensions/flutter_matrix_dart_sdk_database/` — БД/SQLCipher.
-9. `lib/pages/chat/chat.dart` + `chat_view.dart` — показательный feature.
-10. `lib/pages/bootstrap/` и `lib/pages/key_verification/` — E2EE UX.
-11. `lib/utils/background_push.dart` и notification handlers — background flow.
-12. `test/` и `integration_test/` — ожидаемое поведение.
+```json
+{
+  "defaultHomeserver": "matrix.local.test",
+  "presetHomeserver": "https://matrix.local.test"
+}
+```
 
-### Внешние первичные источники
+При web-развёртывании homeserver должен разрешать origin клиента по CORS, а
+HTTPS-страница не сможет безопасно обращаться к HTTP homeserver из-за mixed
+content. Используйте HTTPS с обеих сторон.
 
-Сверяйте детали протокола и deployment с актуальными версиями:
+### 14.4 Ручной smoke test
 
-- [Matrix specification](https://spec.matrix.org/latest/)
-- [Matrix Client-Server API](https://spec.matrix.org/latest/client-server-api/)
-- [Matrix encryption guide](https://matrix.org/docs/matrix-concepts/end-to-end-encryption/)
-- [Synapse documentation](https://element-hq.github.io/synapse/latest/)
-- [Synapse installation](https://element-hq.github.io/synapse/latest/setup/installation.html)
-- [Synapse reverse proxy](https://element-hq.github.io/synapse/latest/reverse_proxy.html)
-- [Synapse TURN setup](https://element-hq.github.io/synapse/latest/turn-howto.html)
-- [Flutter documentation](https://docs.flutter.dev/)
-- [go_router documentation](https://pub.dev/packages/go_router)
-- [matrix Dart SDK](https://pub.dev/packages/matrix)
+Создайте Alice и Bob и последовательно проверьте:
+
+1. login Alice, затем Bob на другом client/device;
+2. создание незашифрованной комнаты и обмен сообщениями;
+3. создание private encrypted room;
+4. до verification убедитесь, как UI показывает trust/missing keys;
+5. SAS verification emoji/числа между устройствами;
+6. отправка текста и файла в E2EE room;
+7. restart клиента и Synapse, проверка local cache и повторного sync;
+8. login Alice на новом устройстве и восстановление key backup;
+9. logout старого устройства/revoke session;
+10. offline send, reconnect и разрешение pending event;
+11. edit, reaction, reply, redaction, read receipt и typing;
+12. если настроены TURN/push — звонок и background notification.
+
+Для диагностики параллельно полезны:
+
+```bash
+docker logs -f synapse
+curl -s http://localhost/_matrix/client/versions
+flutter run --verbose
+```
+
+Не публикуйте verbose logs без просмотра: URL, Matrix IDs, event metadata и
+иногда auth-related данные могут быть чувствительными.
+
+## 15. План изучения кода
+
+### Этап 1. Каркас Flutter
+
+1. `lib/main.dart` — нарисуйте sequence запуска.
+2. `lib/widgets/fluffy_chat_app.dart` — найдите composition root.
+3. `lib/config/routes.dart` — выпишите route tree.
+4. `lib/widgets/matrix.dart` — отметьте application-wide services/subscriptions.
+
+**Задание:** добавьте временный breakpoint в redirect и проследите `/` →
+`/home` → login → `/backup` → `/rooms`.
+
+### Этап 2. Один вертикальный срез
+
+Читайте не весь репозиторий подряд, а сценарий «открыть комнату и отправить
+сообщение»:
+
+1. `chat_list.dart`/`chat_list_view.dart`;
+2. route `/rooms/:roomid`;
+3. `chat.dart`/`chat_view.dart`;
+4. методы `Room`/`Timeline` в зафиксированной версии Matrix SDK;
+5. наблюдайте запрос и последующий sync в логах.
+
+**Задание:** найдите, где возникает pending event, где он получает server event
+ID и как UI обрабатывает failure/retry.
+
+### Этап 3. Persistence
+
+1. `client_manager.dart`;
+2. database `builder.dart` и `cipher.dart`;
+3. `setting_keys.dart`;
+4. запустите client, закройте сеть, перезапустите и проверьте доступный cache.
+
+**Задание:** разделите наблюдаемые данные на preferences, SDK DB, secure storage,
+file cache и homeserver DB.
+
+### Этап 4. E2EE
+
+1. `settings_security`, `device_settings`, `key_verification`;
+2. crypto subscriptions в `MatrixState`;
+3. `init_with_restore.dart` и bootstrap route;
+4. encrypted room между двумя устройствами.
+
+**Задание:** зафиксируйте четыре состояния: ключ есть/нет, устройство trusted/
+untrusted. Не экспериментируйте на аккаунте без сохранённого recovery key.
+
+### Этап 5. Platform integrations
+
+По очереди изучите `background_push.dart`, notification handlers, file selector,
+media dialogs и `utils/voip`. Для каждого выпишите:
+
+- общий Dart interface;
+- platform branch/plugin;
+- permission;
+- foreground/background lifecycle;
+- fallback при отсутствии capability.
+
+### Как безопасно вносить изменения
+
+```bash
+dart format lib test integration_test
+flutter analyze
+flutter test
+```
+
+Для изменения route добавьте deep-link/reload test. Для изменения crypto flow не
+пишите собственные crypto primitives и обязательно тестируйте два устройства,
+unverified state, missing key и restore. Для persistence проверяйте upgrade со
+старой БД, а не только чистую установку.
+
+## 16. Глоссарий и частые ошибки
+
+| Термин | Простое объяснение |
+|---|---|
+| Homeserver | Сервер, на котором зарегистрирован Matrix-аккаунт и который участвует в доставке/федерации. |
+| Synapse | Конкретная реализация homeserver, не название клиентского протокола. |
+| Federation | Обмен событиями между разными homeserver. Для теста одного сервера необязателен. |
+| Room | Распределённый журнал Matrix events со state. DM тоже является room. |
+| Device | Отдельная crypto/session identity одного login, не обязательно физический аппарат. |
+| Sync token | Позиция клиента в потоке серверных изменений. |
+| E2EE | Шифрование содержимого между конечными устройствами. |
+| Verification | Внешняя проверка, что crypto identity второго устройства настоящая. |
+| Cross-signing | Цепочка подписей, позволяющая переносить доверие между устройствами аккаунта. |
+| Key backup | Зашифрованная серверная резервная копия room keys, а не plaintext истории. |
+| MXC URI | Ссылка Matrix на media; для загрузки требуется преобразование в HTTP API request. |
+| Power level | Числовая Matrix-модель разрешений действий в комнате. |
+| UIA | Многоэтапная повторная аутентификация для чувствительной операции. |
+
+### Частые неверные предположения
+
+- «Synapse расшифрует E2EE при поиске» — нет; server-side поиск plaintext для
+  корректно E2EE-события невозможен без утечки ключей.
+- «Пароль аккаунта автоматически восстанавливает всю encrypted history» — не
+  обязательно; нужен доступ к старому trusted device или настроенному recovery.
+- «`setState` означает плохую архитектуру» — нет; для локального widget state это
+  наиболее прямой механизм. Проблема начинается при дублировании domain state.
+- «Provider автоматически следит за всеми полями `MatrixState`» — нет, здесь
+  `Matrix.of` читает provider без подписки.
+- «`state.extra` достаточно для web URL» — нет; после reload runtime object
+  потерян.
+- «Локальный HTTP подходит для production» — нет; он допустим только в
+  контролируемом стенде.
+- «Очистка приложения удалит сообщения у всех» — нет; локальный cache и серверные
+  events имеют разный lifecycle.
 
 ---
 
-## Короткая ментальная модель
+## Короткая схема для запоминания
 
-Если оставить пять тезисов:
+```text
+go_router выбирает экран
+  → StatefulWidget/StreamBuilder управляет представлением
+  → MatrixState выбирает Client и связывает платформенные сервисы
+  → matrix SDK управляет Room/Timeline/Event/sync/E2EE
+  → MatrixSdkDatabase даёт offline state
+  → Synapse обслуживает Client-Server API и (при необходимости) federation
+```
 
-1. **FluffyChat — UI/integration layer над Matrix Dart SDK**, а не реализация Synapse.
-2. **Source of truth для чатов — SDK + его локальная БД + server sync**, не единый Flutter store.
-3. **State management гибридный:** `State/setState`, streams, futures и небольшой global `Provider<MatrixState>`.
-4. **Три защиты различны:** HTTPS, Matrix E2EE и SQLCipher at-rest.
-5. **Лучший способ изучения — два пользователя, несколько устройств и трассировка** `route → controller → Room/Timeline → HTTP/sync → stream → rebuild`.
+Лучший способ изучить проект — держать два тестовых клиента, открытый
+`docker logs -f synapse`, Flutter debugger и читать один пользовательский поток
+вертикально: от нажатия в widget до SDK event, HTTP/sync и обратного rebuild UI.
