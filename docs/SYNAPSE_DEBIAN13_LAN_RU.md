@@ -269,6 +269,15 @@ matrix-lab.example.net. 300 IN A 192.168.10.50
 resolver/router блокируют DNS rebinding, имя не работает вне LAN, а изменение
 кэшируется. Для лаборатории допустимо, но split DNS через dnsmasq чище.
 
+### 4.6 Проверка после настройки dnsmasq
+```bash
+# Критично проверить разрешение имени с самого сервера
+dig @127.0.0.1 pawga.com A +short
+# И с другого компьютера в сети
+dig @192.168.0.50 pawga.com A +short
+Это гарантирует, что локальный DNS сервер отвечает правильно.
+```
+
 ## 5. TLS для официальных мобильных клиентов
 
 ### 5.1 Рекомендуемый вариант: публичный CA + DNS-01
@@ -325,6 +334,65 @@ dig TXT _acme-challenge.matrix-lab.example.net @8.8.8.8
 FluffyChat доверится тому же локальному CA. Публично доверенный сертификат с
 DNS-01 максимально близок к реальной эксплуатации и не требует менять trust
 store тестовых устройств.
+
+Важное предупреждение: При использовании локального CA критически важно соблюдать 
+иерархию сертификатов. Нельзя использовать корневой сертификат CA для непосредственной 
+работы веб-сервера. Это приведёт к ошибкам доверия в браузерах и приложениях, так как 
+нарушается цепочка подписи и не соблюдаются требования к имени субъекта.
+
+### 5.3 Пошаговая настройка локального CA для сервера pawga.com
+Этот раздел должен описывать правильную процедуру, которую мы в итоге применили:
+
+#### 5.3.1 Создание корневого Центра Сертификации (CA) (делается один раз):
+
+```bash
+sudo mkdir -p /etc/ssl/lab-ca
+cd /etc/ssl/lab-ca
+sudo openssl genrsa -out ca.key 4096
+sudo openssl req -new -x509 -days 3650 -key ca.key -out ca.crt -subj "/C=RU/ST=Moscow/L=Lab/O=Local Lab/CN=Local Lab CA"
+```
+
+Файл ca.crt — это ваш корневой сертификат. Его нужно установить как доверенный на всех клиентских устройствах (телефонах и компьютерах).
+
+#### 5.3.2 Создание конечного сертификата для вашего домена (например, pawga.com):
+Этот сертификат будет использоваться веб-сервером nginx.
+
+a) Создайте файл расширений pawga.ext:
+
+```bash
+sudo nano /etc/ssl/lab-ca/pawga.ext
+```
+Вставьте:
+
+```text
+authorityKeyIdentifier=keyid,issuer
+basicConstraints=CA:FALSE
+keyUsage = digitalSignature, nonRepudiation, keyEncipherment, dataEncipherment
+subjectAltName = @alt_names
+
+[alt_names]
+DNS.1 = pawga.com
+b) Сгенерируйте ключ и запрос на сертификат (CSR) для домена, а затем подпишите его вашим CA:
+```
+
+```bash
+cd /etc/ssl/lab-ca
+sudo openssl req -new -nodes -newkey rsa:2048 -keyout pawga.key -out pawga.csr -subj "/O=Local Lab/CN=pawga.com"
+sudo openssl x509 -req -in pawga.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out pawga.crt -days 365 -extfile pawga.ext
+```
+#### 5.3.3 Итоговые файлы:
+
+Для nginx на сервере нужны: pawga.crt (сертификат сайта) и pawga.key (приватный ключ сайта).
+
+Для клиентских устройств нужен только корневой сертификат ca.crt.
+
+#### 5.3.4 Распространение корневого сертификата на устройства:
+
+macOS: Скопируйте ca.crt, откройте его в "Связке ключей" и установите доверие (SSL → Всегда доверять).
+
+iOS/iPadOS: Скопируйте ca.crt на устройство, установите профиль и включите полное доверие в Настройках → Основные → Об этом устройстве → Доверие сертификатов.
+
+Android: Скопируйте ca.crt на устройство и установите как сертификат для VPN и приложений.
 
 ## 6. Подготовка Debian 13
 
@@ -563,10 +631,12 @@ curl -fsS http://127.0.0.1:8008/health
 server {
     listen 443 ssl http2;
     listen [::]:443 ssl http2;
-    server_name matrix-lab.example.net;
+    server_name pawga.com;
 
-    ssl_certificate     /etc/letsencrypt/live/matrix-lab.example.net/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/matrix-lab.example.net/privkey.pem;
+    # Пути к конечному сертификату и ключу для сайта
+    ssl_certificate     /etc/ssl/lab-ca/pawga.crt;
+    ssl_certificate_key /etc/ssl/lab-ca/pawga.key;
+
     ssl_protocols TLSv1.2 TLSv1.3;
 
     client_max_body_size 100M;
@@ -932,6 +1002,15 @@ Matrix IDs и приватные адреса. Не включайте SQL DEBUG
 - [ ] Новое устройство проходит verification и recovery.
 - [ ] Restart сервера не теряет комнаты и media.
 - [ ] Push, TURN/VoIP, SSO и federation учитываются как отдельные этапы.
+
+### Устройства
+- [ ] Корневой сертификат (ca.crt) установлен и доверен на всех тестовых устройствах.
+- [ ] DNS-сервер (192.168.0.50) вручную прописан в настройках Wi-Fi каждого устройства.
+
+### Сертификаты и nginx
+- [ ] В nginx используется сертификат, подписанный CA, а не сам корневой сертификат CA.
+- [ ] Поле Subject сертификата содержит CN=pawga.com, а в расширении Subject Alternative Name (SAN) указан DNS:pawga.com.
+- [ ] Срок действия сертификата сервера не превышает 398 дней (в примере — 365 дней).
 
 ---
 
