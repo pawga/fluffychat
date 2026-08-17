@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: 2026 Local FluffyChat study fork
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Applies to package webcrypto 0.6.1 in the Dart pub-cache:
+#   ~/.pub-cache/hosted/pub.dev/webcrypto-0.6.1/third_party/boringssl/sources.cmake
+#
+# This is not a binary blob. The four .S files already ship inside webcrypto.
+# The upstream CMake list crypto_sources_apple_x86_64 simply forgets to compile
+# them, while the C code still calls fiat_p256_adx_mul / fiat_p256_adx_sqr on
+# Intel (ios-x64 simulator). Linux x86_64 already includes the same files.
+#
+# Needed only on Intel Mac + iOS Simulator. Apple Silicon and physical iPhones
+# (arm64) do not hit this linker error.
+#
+--- a/third_party/boringssl/sources.cmake
++++ b/third_party/boringssl/sources.cmake
+@@ -321,6 +321,10 @@ set(crypto_sources_apple_x86_64
+   ${BORINGSSL_ROOT}gen/crypto/md5-586-apple.S
+   ${BORINGSSL_ROOT}gen/crypto/md5-x86_64-apple.S
+   ${BORINGSSL_ROOT}gen/test_support/trampoline-x86_64-apple.S
++  ${BORINGSSL_ROOT}third_party/fiat/asm/fiat_curve25519_adx_mul.S
++  ${BORINGSSL_ROOT}third_party/fiat/asm/fiat_curve25519_adx_square.S
++  ${BORINGSSL_ROOT}third_party/fiat/asm/fiat_p256_adx_mul.S
++  ${BORINGSSL_ROOT}third_party/fiat/asm/fiat_p256_adx_sqr.S
+ )

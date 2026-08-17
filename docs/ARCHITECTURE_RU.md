@@ -25,7 +25,9 @@
 - локальная БД и её шифрование —
   `lib/utils/matrix_sdk_extensions/flutter_matrix_dart_sdk_database/`;
 - локальный тестовый Synapse — `scripts/prepare_integration_test.sh` и
-  `integration_test/synapse/`.
+  `integration_test/synapse/`;
+- локальная iOS-сборка учебного стенда (Intel Mac, личный Apple Team,
+  упрощения подписи) — [`IOS_LOCAL_BUILD_RU.md`](IOS_LOCAL_BUILD_RU.md).
 
 Если эти файлы существенно меняются, соответствующий раздел руководства также
 нужно пересмотреть. Текст описывает именно реализацию в данном репозитории, а не
@@ -44,6 +46,7 @@
 9. [Аутентификация и несколько аккаунтов](#9-аутентификация-и-несколько-аккаунтов)
 10. [Сообщения, медиа, уведомления и звонки](#10-сообщения-медиа-уведомления-и-звонки)
 11. [Адаптивный UI, платформы и локализация](#11-адаптивный-ui-платформы-и-локализация)
+    — в том числе [локальная iOS-сборка](#111-локальная-ios-сборка-учебного-стенда)
 12. [Основные библиотеки](#12-основные-библиотеки)
 13. [Тестирование](#13-тестирование)
 14. [Запуск с локальным Synapse](#14-запуск-с-локальным-synapse)
@@ -106,7 +109,9 @@ FluffyChat хранит локальный кэш, сессию, криптог�
 | `test/` | Widget/unit tests. |
 | `integration_test/` | Сквозные сценарии и тестовая конфигурация Synapse. |
 | `android/`, `ios/`, `linux/`, `macos/`, `windows/`, `web/` | Flutter runners и платформенная конфигурация. |
-| `scripts/` | Сборка, подготовка web, интеграционных тестов и релизные операции. |
+| `docs/` | Архитектура, LAN Synapse и локальная iOS-сборка учебного стенда. |
+| `patches/` | Патчи зависимостей, которые нельзя класть в pub-cache навсегда (сейчас — CMake-список `webcrypto` для Intel iOS Simulator). |
+| `scripts/` | Сборка, подготовка web, интеграционных тестов, релизные операции и `apply-webcrypto-ios-x64-patch.sh`. |
 
 ### Типичная структура экрана
 
@@ -391,7 +396,10 @@ offline cache.
 2. при первом запуске генерирует `Random.secure()` 32 случайных байта;
 3. сохраняет base64url-представление в Keychain/Keystore/libsecret-подобное
    защищённое хранилище платформы;
-4. на iOS использует app group и умеет мигрировать legacy key;
+4. на iOS официальный клиент пишет ключ в App Group keychain и умеет
+   мигрировать legacy key. На учебном стенде App Group временно снят:
+   ключ лежит в обычном keychain приложения — см.
+   [`IOS_LOCAL_BUILD_RU.md`](IOS_LOCAL_BUILD_RU.md);
 5. если secure storage недоступен, возвращает `null` и предупреждает, что база
    не зашифрована.
 
@@ -522,6 +530,15 @@ Encrypted key backup нужен, чтобы восстановить истор�
 - Не отключайте TLS certificate verification ради локального удобства в
   production.
 
+### 8.7 `webcrypto` — это не Vodozemac
+
+Пакет `webcrypto` 0.6.1 тянется транзитивно и собирает BoringSSL. Он нужен
+Flutter native assets, но **не** реализует Matrix Olm/Megolm. E2EE идёт через
+`flutter_vodozemac`. На Intel iOS Simulator (`ios-x64`) CMake-список пакета
+забывает четыре уже входящих в него `.S` файла — см.
+[`IOS_LOCAL_BUILD_RU.md`](IOS_LOCAL_BUILD_RU.md). Это баг зависимости, не
+клиента; официальный CI его не видит, потому что собирает arm64.
+
 ## 9. Аутентификация и несколько аккаунтов
 
 ### 9.1 Discovery и login
@@ -577,6 +594,11 @@ Push — сигнал о событии, а не источник состоян
 синхронизируется с homeserver. Это особенно важно для E2EE: plaintext не должен
 без необходимости уходить стороннему push provider.
 
+На учебном iOS-стенде Push и App Groups временно сняты с подписи (wildcard
+профиль + непринятый Apple PLA). Код NSE/Share не удалён. Как вернуть
+capability — в [`IOS_LOCAL_BUILD_RU.md`](IOS_LOCAL_BUILD_RU.md) §4–§6. Login к
+LAN Synapse от Push не зависит.
+
 ### 10.3 VoIP
 
 Экспериментальный `VoipPlugin` включается настройкой. Media plane использует
@@ -600,6 +622,22 @@ Matrix signaling и WebRTC media — разные уровни. Для звон�
   biometrics, background execution, file paths, notifications и emoji SAS могут
   быть доступны не везде.
 
+### 11.1 Локальная iOS-сборка учебного стенда
+
+Официальный App Store-клиент и `flutter run` из этого дерева — **разные
+приложения** (разные Bundle ID и Team). Сборка из исходников на Intel Mac
+упирается в native assets `webcrypto` на симуляторе и в подпись на устройстве.
+
+Подробности, таблица упрощений и обратный путь:
+[`IOS_LOCAL_BUILD_RU.md`](IOS_LOCAL_BUILD_RU.md). Кратко:
+
+- патч — четыре строки CMake в pub-cache, не бинарники и не копия `.S` в git
+  FluffyChat; в репозитории лежат `patches/webcrypto-0.6.1-apple-x86_64-adx.patch`
+  и `scripts/apply-webcrypto-ios-x64-patch.sh`;
+- GitHub job `build_debug_ios` (`macos-15`, `flutter build ios --no-codesign`)
+  собирает arm64 без Intel-симулятора и без установки на телефон;
+- пустые entitlements — временное упрощение подписи, не вырезание login/E2EE.
+
 ## 12. Основные библиотеки
 
 Ниже не механический пересказ `pubspec.yaml`, а группировка по роли.
@@ -619,6 +657,7 @@ Matrix signaling и WebRTC media — разные уровни. Для звон�
 | Библиотека | Роль |
 |---|---|
 | `flutter_vodozemac` | Matrix crypto primitives через native/WASM Vodozemac. |
+| `webcrypto` (транзитивно) | Web Cryptography / BoringSSL native assets. Не путать с E2EE. На Intel iOS Simulator нужен патч CMake-списка, см. [`IOS_LOCAL_BUILD_RU.md`](IOS_LOCAL_BUILD_RU.md). |
 | `flutter_secure_storage` | SQLCipher key, app-lock data и другие малые секреты в OS vault. |
 | `sqflite_common_ffi` | Native SQLite/SQLCipher доступ для Matrix SDK database. |
 | `shared_preferences` | Несекретные настройки и список локальных client instances. |
@@ -691,6 +730,13 @@ chat backup и multi-account. Это хороший executable tour по пол�
 потокам.
 
 ## 14. Запуск с локальным Synapse
+
+Чтобы **собрать iOS-клиент из этого дерева** (не App Store) на Intel Mac или
+личном Apple Team, сначала
+[`IOS_LOCAL_BUILD_RU.md`](IOS_LOCAL_BUILD_RU.md): CMake, патч `webcrypto` для
+симулятора, Bundle ID `com.pawga.fluffychat`, пустые entitlements до принятия
+PLA. Login к LAN Synapse от Push/App Groups не зависит. Сетевую проверку
+клиента имеет смысл делать после возврата LAN-настроек на Mac/телефоне.
 
 ### 14.1 Самый быстрый путь: встроенный testbed
 
@@ -919,6 +965,10 @@ unverified state, missing key и restore. Для persistence проверяйт�
 | MXC URI | Ссылка Matrix на media; для загрузки требуется преобразование в HTTP API request. |
 | Power level | Числовая Matrix-модель разрешений действий в комнате. |
 | UIA | Многоэтапная повторная аутентификация для чувствительной операции. |
+| PLA | Program License Agreement Apple Developer Program. Пока новая версия не принята на developer.apple.com/account, портал не регистрирует App ID с Push/App Groups. |
+| Wildcard profile | Профиль `TeamID.*`. Ставит простое приложение, но не несёт App Groups, Push и Associated Domains. |
+| App Group | Общий контейнер приложения и расширений (NSE, Share). Нужен для preview E2EE на локскрине, не для login. |
+| `webcrypto` | Транзитивный пакет BoringSSL. Баг CMake-списка `apple_x86_64` ломает только Intel iOS Simulator. |
 
 ### Частые неверные предположения
 
@@ -936,6 +986,8 @@ unverified state, missing key и restore. Для persistence проверяйт�
   контролируемом стенде.
 - «Очистка приложения удалит сообщения у всех» — нет; локальный cache и серверные
   events имеют разный lifecycle.
+- «Патч webcrypto — это Matrix E2EE или бинарники в git» — нет; это четыре
+  строки CMake-списка в pub-cache для Intel iOS Simulator. E2EE — Vodozemac.
 
 ---
 

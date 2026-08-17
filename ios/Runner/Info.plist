@@ -4,12 +4,13 @@
 <dict>
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
-		<string>im.fluffychat.app</string>
+		<string>com.pravera.flutter_foreground_task.refresh</string>
+		<string>com.pawga.fluffychat</string>
 	</array>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>FluffyChat</string>
+	<string>FluffyChat Dev</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -30,7 +31,7 @@
 			<key>CFBundleTypeRole</key>
 			<string>Editor</string>
 			<key>CFBundleURLName</key>
-			<string>im.fluffychat.app.uris</string>
+			<string>com.pawga.fluffychat.uris</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>ShareMedia-$(PRODUCT_BUNDLE_IDENTIFIER)</string>

@@ -52,6 +52,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 - [Detailed architecture and local Synapse guide (Russian)](docs/ARCHITECTURE_RU.md)
 - [Synapse laboratory server on Debian 13 for official mobile clients (Russian)](docs/SYNAPSE_DEBIAN13_LAN_RU.md)
+- [Local iOS study build: webcrypto patch, signing, App Groups (Russian)](docs/IOS_LOCAL_BUILD_RU.md)
 
 Please visit the website for installation instructions:
 
